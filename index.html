@@ -54,6 +54,58 @@
   // 限界は瞬間でなく、一定時間超え続けたときだけ切断する (2026-08-09 実機テストで決定)
   const CUT_GRACE_TIME = .20;
   const WALL = 15;   // 跳ね返る壁 (バンパー) の太さ
+  // ---- 調整値: 経済・難易度・装備・星 ----------------------------------
+  const SAVE_KEY = 'furiko_save_v1'; // gitleaks:allow (セーブ保存キー名、秘密情報ではない)
+  const SAVE_VERSION = 1;
+  const BALANCE = Object.freeze({
+    scorePerFragment: 50,
+    failurePayoutRate: .5,
+    easySlowTrigger: .72,
+    easyTimeScale: .55,
+    revives: Object.freeze({ easy: 3, normal: 1, hard: 0 }),
+    pickupRadius: 11,
+    pickupVisualRadius: 9,
+    clearResultDelay: .55,
+    cutResultDelay: 1.15,
+    workshopScale: .46
+  });
+  const DIFFICULTIES = Object.freeze([
+    Object.freeze({ id: 'easy', flames: 1, color: '#55c978' }),
+    Object.freeze({ id: 'normal', flames: 2, color: '#ffad32' }),
+    Object.freeze({ id: 'hard', flames: 3, color: '#ef5261' })
+  ]);
+  const EQUIPMENT = Object.freeze({
+    balls: Object.freeze([
+      Object.freeze({ id: 'normalBall', name: 'のーまるだま', price: 0, radiusScale: 1, scoreScale: 1, mass: 1, color: '#654fd5' }),
+      Object.freeze({ id: 'largeBall', name: 'おおきなたま', price: 12, radiusScale: 1.3, scoreScale: .85, mass: 1, color: '#ef6a55' }),
+      Object.freeze({ id: 'ironBall', name: 'てつのたま', price: 18, radiusScale: 1, scoreScale: 1, mass: 1.6, color: '#65758b' })
+    ]),
+    rubbers: Object.freeze([
+      Object.freeze({ id: 'normalRubber', name: 'ふつうのごむ', price: 0, breakScale: 1, warningStart: .72, glow: 1, color: '#5948bc' }),
+      Object.freeze({ id: 'longRubber', name: 'ながいごむ', price: 14, breakScale: 1.12, warningStart: .72, glow: 1, color: '#36a874' }),
+      Object.freeze({ id: 'glowRubber', name: 'ひかるごむ', price: 16, breakScale: 1, warningStart: .60, glow: 2.2, color: '#ff9d26' })
+    ])
+  });
+  const STAGES = Object.freeze([
+    Object.freeze({
+      id: 1, locked: false, starScores: Object.freeze([400, 850, 1150]),
+      targets: Object.freeze([
+        Object.freeze({ x: .34, y: .60, radiusScale: 1, color: '#ffd43b' }),
+        Object.freeze({ x: .52, y: .70, radiusScale: 1, color: '#52d273' }),
+        Object.freeze({ x: .67, y: .54, radiusScale: 1, color: '#ff7a59' }),
+        Object.freeze({ x: .82, y: .76, radiusScale: 1.08, color: '#75d9ff', glass: true })
+      ]),
+      // 内側は安全で少なめ、外周は危険で多め。
+      fragments: Object.freeze([
+        Object.freeze({ x: .48, y: .47, value: 1 }),
+        Object.freeze({ x: .72, y: .31, value: 2 }),
+        Object.freeze({ x: .88, y: .44, value: 2 }),
+        Object.freeze({ x: .14, y: .72, value: 2 })
+      ])
+    }),
+    Object.freeze({ id: 2, locked: true, starScores: Object.freeze([600, 950, 1300]), targets: Object.freeze([]), fragments: Object.freeze([]) }),
+    Object.freeze({ id: 3, locked: true, starScores: Object.freeze([700, 1050, 1450]), targets: Object.freeze([]), fragments: Object.freeze([]) })
+  ]);
   const params = {
     gravity: 850,
     spring: 34,
@@ -72,9 +124,11 @@
 
   const view = { w: 1, h: 1, dpr: 1 };
   let state = 'title';
+  let playState = 'active';
   let landscape = true;
   let lastFrame = performance.now();
   let accumulator = 0;
+  let workshopAccumulator = 0;
   let sectionTime = 0;
   let stateTime = 0;
   let score = 0;
@@ -92,6 +146,15 @@
   const wallFlash = { left: 0, right: 0, top: 0, bottom: 0 };
   let cutAt = null;
   let clearButton = { x: 0, y: 0, w: 0, h: 0 };
+  let uiHitAreas = [];
+  let selectedStage = 0;
+  let revivesLeft = 0;
+  let runFragments = 0;
+  let stageFragments = [];
+  let collectedFragmentIds = new Set();
+  let resultData = null;
+  let saveData = null;
+  let workshopPreview = null;
 
   const pointer = {
     active: false, id: null, x: 0, y: 0, isMouse: false,
@@ -99,9 +162,16 @@
   };
   const pivot = { x: 0, y: 0, vx: 0, vy: 0, tx: 0, ty: 0 };
   const ball = { x: 0, y: 0, px: 0, py: 0, vx: 0, vy: 0, r: 26 };
+  const BASE_BALL_RADIUS = 26;
   let targets = [];
   const particles = [];
   const trail = [];
+  const workshop = {
+    bounds: { left: 0, right: 0, top: 0, bottom: 0 },
+    pivot: { x: 0, y: 0 },
+    ball: { x: 0, y: 0, vx: 0, vy: 0 },
+    pointerActive: false
+  };
 
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const lerp = (a, b, t) => a + (b - a) * t;
@@ -121,6 +191,103 @@
     ctx.closePath();
   };
 
+  function freshSave() {
+    const stages = {};
+    for (const stage of STAGES) {
+      stages[stage.id] = { stars: { easy: 0, normal: 0, hard: 0 }, firstClearDifficulty: null };
+    }
+    return {
+      version: SAVE_VERSION,
+      fragments: 0,
+      owned: ['normalBall', 'normalRubber'],
+      equipment: { ball: 'normalBall', rubber: 'normalRubber' },
+      stages,
+      difficulty: 'normal'
+    };
+  }
+
+  function loadSave() {
+    const fallback = freshSave();
+    try {
+      const raw = localStorage.getItem(SAVE_KEY);
+      if (!raw) return fallback;
+      const data = JSON.parse(raw);
+      const ballIds = EQUIPMENT.balls.map(item => item.id);
+      const rubberIds = EQUIPMENT.rubbers.map(item => item.id);
+      const allIds = new Set([...ballIds, ...rubberIds]);
+      const difficultyIds = DIFFICULTIES.map(item => item.id);
+      if (!data || data.version !== SAVE_VERSION || !Number.isFinite(data.fragments) || data.fragments < 0 ||
+          !Array.isArray(data.owned) || !data.equipment || !data.stages ||
+          !ballIds.includes(data.equipment.ball) || !rubberIds.includes(data.equipment.rubber) ||
+          !difficultyIds.includes(data.difficulty)) throw new Error('invalid save');
+      fallback.fragments = Math.floor(data.fragments);
+      fallback.owned = [...new Set(['normalBall', 'normalRubber', ...data.owned.filter(id => allIds.has(id))])];
+      if (!fallback.owned.includes(data.equipment.ball) || !fallback.owned.includes(data.equipment.rubber)) throw new Error('invalid equipment');
+      fallback.equipment = { ball: data.equipment.ball, rubber: data.equipment.rubber };
+      fallback.difficulty = data.difficulty;
+      for (const stage of STAGES) {
+        const source = data.stages[stage.id];
+        if (!source || !source.stars) continue;
+        const record = fallback.stages[stage.id];
+        for (const difficulty of DIFFICULTIES) {
+          const stars = Number(source.stars[difficulty.id]);
+          record.stars[difficulty.id] = Number.isFinite(stars) ? clamp(Math.floor(stars), 0, 3) : 0;
+        }
+        record.firstClearDifficulty = difficultyIds.includes(source.firstClearDifficulty) ? source.firstClearDifficulty : null;
+      }
+      return fallback;
+    } catch (error) {
+      try { localStorage.removeItem(SAVE_KEY); } catch (ignored) {}
+      return fallback;
+    }
+  }
+
+  function saveGame() {
+    try { localStorage.setItem(SAVE_KEY, JSON.stringify(saveData)); } catch (ignored) {}
+  }
+
+  function findEquipment(id) {
+    return [...EQUIPMENT.balls, ...EQUIPMENT.rubbers].find(item => item.id === id);
+  }
+
+  function equippedBall(preview = false) {
+    const id = preview ? workshopPreview.ball : saveData.equipment.ball;
+    return EQUIPMENT.balls.find(item => item.id === id) || EQUIPMENT.balls[0];
+  }
+
+  function equippedRubber(preview = false) {
+    const id = preview ? workshopPreview.rubber : saveData.equipment.rubber;
+    return EQUIPMENT.rubbers.find(item => item.id === id) || EQUIPMENT.rubbers[0];
+  }
+
+  function effectiveBreakLength(preview = false) {
+    return params.breakLength * equippedRubber(preview).breakScale;
+  }
+
+  function effectiveDangerStretch(preview = false) {
+    return equippedRubber(preview).warningStart;
+  }
+
+  function syncEquippedBall() {
+    ball.r = BASE_BALL_RADIUS * equippedBall().radiusScale;
+  }
+
+  function addHitArea(id, x, y, w, h, data = null) {
+    uiHitAreas.push({ id, x, y, w, h, data });
+  }
+
+  function hitAreaAt(x, y) {
+    for (let i = uiHitAreas.length - 1; i >= 0; i--) {
+      const area = uiHitAreas[i];
+      if (x >= area.x && x <= area.x + area.w && y >= area.y && y <= area.y + area.h) return area;
+    }
+    return null;
+  }
+
+  saveData = loadSave();
+  workshopPreview = { ball: saveData.equipment.ball, rubber: saveData.equipment.rubber };
+  saveGame();
+
   // ---- 画面と配置 ---------------------------------------------------------
   function resize() {
     view.w = Math.max(1, window.innerWidth);
@@ -139,6 +306,8 @@
     }
     if (!pivot.x || state === 'title') placeStart(false);
     buildTargets(true);
+    buildStageFragments(true);
+    resetWorkshopSandbox();
   }
 
   // 跳ね返る場所を見える壁と一致させる。床は草地の上端に置く。
@@ -173,16 +342,22 @@
     const oldState = preserveDead ? targets.map(t => ({ dead: t.dead, damage: t.damage })) : [];
     const h = view.h, w = view.w;
     const radius = clamp(h * .062, 24, 40);
-    targets = [
-      makeTarget(w * .34, h * .60, radius, '#ffd43b', 0),
-      makeTarget(w * .52, h * .70, radius, '#52d273', 1),
-      makeTarget(w * .67, h * .54, radius, '#ff7a59', 2),
-      makeTarget(w * .82, h * .76, radius * 1.08, '#75d9ff', 3, true)
-    ];
+    const stage = STAGES[selectedStage] || STAGES[0];
+    targets = stage.targets.map((item, id) => makeTarget(
+      w * item.x, h * item.y, radius * item.radiusScale, item.color, id, !!item.glass
+    ));
     targets.forEach((t, i) => {
       t.dead = oldState[i]?.dead || false;
       t.damage = oldState[i]?.damage || 0;
     });
+  }
+
+  function buildStageFragments(preserveCollected = false) {
+    const stage = STAGES[selectedStage] || STAGES[0];
+    stageFragments = stage.fragments.map((item, id) => ({
+      id, x: view.w * item.x, y: view.h * item.y, value: item.value,
+      collected: preserveCollected && collectedFragmentIds.has(id), pulse: id * 1.7
+    }));
   }
 
   function makeTarget(x, y, r, color, id, glass = false) {
@@ -204,9 +379,24 @@
     particles.length = 0;
     trail.length = 0;
     buildTargets(false);
+    buildStageFragments(true);
     placeStart(true);
     state = 'playing';
+    playState = 'active';
     accumulator = 0;
+  }
+
+  function startStage(stageIndex) {
+    const stage = STAGES[stageIndex];
+    if (!stage || stage.locked) return;
+    selectedStage = stageIndex;
+    revivesLeft = BALANCE.revives[saveData.difficulty];
+    runFragments = 0;
+    collectedFragmentIds = new Set();
+    resultData = null;
+    syncEquippedBall();
+    resetSection();
+    losePointer();
   }
 
   function effectiveNaturalLength() {
@@ -216,7 +406,7 @@
   function stretchRatioAt(bx = ball.x, by = ball.y, px = pivot.x, py = pivot.y) {
     const current = Math.hypot(bx - px, by - py);
     const natural = effectiveNaturalLength();
-    return clamp((current - natural) / Math.max(1, params.breakLength - natural), 0, 1);
+    return clamp((current - natural) / Math.max(1, effectiveBreakLength() - natural), 0, 1);
   }
 
   // ---- 入力: 時刻付き補間、平滑化、速度・加速度制限 ----------------------
@@ -266,6 +456,64 @@
     stopWarning();
   }
 
+  function setDifficulty(id) {
+    if (!DIFFICULTIES.some(item => item.id === id)) return;
+    saveData.difficulty = id;
+    saveGame();
+  }
+
+  function openWorkshop() {
+    state = 'workshop';
+    workshopPreview = { ball: saveData.equipment.ball, rubber: saveData.equipment.rubber };
+    losePointer();
+    resetWorkshopSandbox();
+  }
+
+  function applyWorkshopItem() {
+    const ballItem = findEquipment(workshopPreview.ball);
+    const rubberItem = findEquipment(workshopPreview.rubber);
+    const unowned = [ballItem, rubberItem].filter(item => !saveData.owned.includes(item.id));
+    const totalPrice = unowned.reduce((sum, item) => sum + item.price, 0);
+    if (saveData.fragments < totalPrice) { boingSound(); return; }
+    saveData.fragments -= totalPrice;
+    for (const item of unowned) saveData.owned.push(item.id);
+    saveData.equipment = { ball: workshopPreview.ball, rubber: workshopPreview.rubber };
+    syncEquippedBall();
+    saveGame();
+    clearSound();
+  }
+
+  function handleUiAction(area) {
+    if (!area) return false;
+    if (area.id === 'difficulty') { setDifficulty(area.data); return true; }
+    if (area.id === 'stage') { startStage(area.data); return true; }
+    if (area.id === 'workshop') { openWorkshop(); return true; }
+    if (area.id === 'backToStages' || area.id === 'resultNext') {
+      state = 'stageSelect'; losePointer(); return true;
+    }
+    if (area.id === 'workshopItem') {
+      const item = findEquipment(area.data);
+      if (EQUIPMENT.balls.includes(item)) workshopPreview.ball = item.id;
+      else workshopPreview.rubber = item.id;
+      resetWorkshopSandbox();
+      return true;
+    }
+    if (area.id === 'workshopApply') { applyWorkshopItem(); return true; }
+    return false;
+  }
+
+  function pointInWorkshop(x, y) {
+    const b = workshop.bounds;
+    return x >= b.left && x <= b.right && y >= b.top && y <= b.bottom;
+  }
+
+  function recordWorkshopPointer(event) {
+    const touchOffset = event.pointerType === 'mouse' ? 0 : clamp(view.h * .10, 36, 56);
+    workshop.pivot.x = clamp(event.clientX, workshop.bounds.left + 18, workshop.bounds.right - 18);
+    workshop.pivot.y = clamp(event.clientY - touchOffset, workshop.bounds.top + 18, workshop.bounds.bottom - 28);
+    workshop.pointerActive = true;
+  }
+
   canvas.addEventListener('pointerdown', event => {
     event.preventDefault();
     registerCornerTap(event);
@@ -273,10 +521,23 @@
     const isMouse = event.pointerType === 'mouse';
     if (pointer.active && !isMouse && pointer.id !== event.pointerId) return;
     unlockAudio();
-    if (state === 'clear' && stateTime > .55 && pointInButton(event.clientX, event.clientY)) {
-      resetSection();
-    } else if (state === 'title') {
-      resetSection();
+    if (state === 'title') {
+      state = 'stageSelect';
+      losePointer();
+      return;
+    }
+    if (state !== 'playing') {
+      if (handleUiAction(hitAreaAt(event.clientX, event.clientY))) return;
+      if (state === 'workshop' && pointInWorkshop(event.clientX, event.clientY)) {
+        recordWorkshopPointer(event);
+        pointer.id = event.pointerId;
+        if (!isMouse) canvas.setPointerCapture?.(event.pointerId);
+      }
+      return;
+    }
+    if (playState === 'clear' && stateTime > BALANCE.clearResultDelay && pointInButton(event.clientX, event.clientY)) {
+      finishStage(true);
+      return;
     }
     pointer.active = true;
     pointer.id = event.pointerId;
@@ -287,9 +548,18 @@
   }, { passive: false });
 
   canvas.addEventListener('pointermove', event => {
+    if (state === 'workshop') {
+      if (event.pointerType === 'mouse') {
+        workshop.pointerActive = pointInWorkshop(event.clientX, event.clientY);
+        if (workshop.pointerActive) recordWorkshopPointer(event);
+      } else if (event.pointerId === pointer.id && workshop.pointerActive) {
+        event.preventDefault(); recordWorkshopPointer(event);
+      }
+      return;
+    }
     if (event.pointerType === 'mouse') {
       // 本物と同じ: マウスは押さなくてもカーソルの位置に支点が付いてくる。
-      if (!landscape || state === 'title') { recordPointer(event); return; }
+      if (!landscape || state !== 'playing') { if (state === 'title') recordPointer(event); return; }
       event.preventDefault();
       pointer.active = true;
       pointer.id = event.pointerId;
@@ -305,12 +575,18 @@
   for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
     canvas.addEventListener(name, event => {
       if (event.pointerType === 'mouse') return;
+      if (state === 'workshop' && event.pointerId === pointer.id) {
+        workshop.pointerActive = false; pointer.id = null; return;
+      }
       if (event.pointerId === pointer.id) losePointer();
     });
   }
   // マウスがゲーム画面の外へ出たら一時停止。
   canvas.addEventListener('pointerleave', event => {
-    if (event.pointerType === 'mouse') losePointer();
+    if (event.pointerType === 'mouse') {
+      if (state === 'workshop') workshop.pointerActive = false;
+      else losePointer();
+    }
   });
   window.addEventListener('blur', losePointer);
   window.addEventListener('pagehide', losePointer);
@@ -326,10 +602,11 @@
     const dx = ball.x - pivot.x;
     const dy = ball.y - pivot.y;
     const dist = Math.max(.001, Math.hypot(dx, dy));
-    let ax = 0, ay = params.gravity;
+    const mass = equippedBall().mass;
+    let ax = 0, ay = params.gravity / mass;
     // ゴムは自然長を超えたときだけ引く。圧縮時の押す力はない。
     if (dist > effectiveNaturalLength()) {
-      const tension = params.spring * (dist - effectiveNaturalLength());
+      const tension = params.spring * (dist - effectiveNaturalLength()) / mass;
       ax -= tension * dx / dist;
       ay -= tension * dy / dist;
     }
@@ -341,6 +618,7 @@
     ball.y += ball.vy * dt;
     collideBounds();
     sweepTargets(oldX, oldY, ball.x, ball.y, dt);
+    sweepFragments(oldX, oldY, ball.x, ball.y);
 
     const stretch = stretchRatioAt();
     if (stretch >= 1) {
@@ -363,7 +641,7 @@
       target.barrierOpen += (open - target.barrierOpen) * (1 - Math.exp(-11 * dt));
     }
     warningClock -= dt;
-    if (stretch >= DANGER_STRETCH && warningClock <= 0) {
+    if (stretch >= effectiveDangerStretch() && warningClock <= 0) {
       warningClock = lerp(.48, .19, stretch);
       warningSound(stretch);
       if (quality > 0) sparkRubber(stretch);
@@ -434,6 +712,19 @@
     }
   }
 
+  function sweepFragments(x1, y1, x2, y2) {
+    for (const item of stageFragments) {
+      if (item.collected) continue;
+      const hit = segmentCircle(x1, y1, x2, y2, item.x, item.y, ball.r + BALANCE.pickupRadius);
+      if (hit === null) continue;
+      item.collected = true;
+      collectedFragmentIds.add(item.id);
+      runFragments += item.value;
+      pickupSound(item.value);
+      fragmentAbsorb(item.x, item.y, item.value);
+    }
+  }
+
   function resolveTargetHit(target, t, x1, y1, x2, y2, dt) {
     const hx = lerp(x1, x2, t), hy = lerp(y1, y2, t);
     let nx = hx - target.x, ny = hy - target.y;
@@ -491,7 +782,7 @@
 
   function destroyTarget(target, points, stretch, glass, intense) {
     target.dead = true;
-    score += Math.round(points);
+    score += Math.round(points * equippedBall().scoreScale);
     combo = comboTime > 0 ? combo + 1 : 1;
     comboTime = COMBO_WINDOW;
     if (glass) glassShatter(target, intense);
@@ -504,7 +795,7 @@
       if (stretchRatioAt() >= 1) {
         cutRubber();
       } else {
-        state = 'clear';
+        playState = 'clear';
         stateTime = 0;
         clearSound();
       }
@@ -512,14 +803,34 @@
   }
 
   function cutRubber() {
-    if (state !== 'playing') return;
-    state = 'cut';
+    if (state !== 'playing' || playState !== 'active') return;
+    playState = 'cut';
     stateTime = 0;
     combo = 0; comboTime = 0;
     cutAt = { x: lerp(pivot.x, ball.x, .52), y: lerp(pivot.y, ball.y, .52) };
     shake = 20;
     cutSound();
     hitBurst(cutAt.x, cutAt.y, '#ff4d50', 20);
+  }
+
+  function finishStage(cleared) {
+    if (resultData) return;
+    const stage = STAGES[selectedStage];
+    const scoreFragments = Math.floor(score / BALANCE.scorePerFragment);
+    const gross = scoreFragments + runFragments;
+    const awarded = cleared ? gross : Math.floor(gross * BALANCE.failurePayoutRate);
+    const stars = cleared ? stage.starScores.filter(limit => score >= limit).length : 0;
+    resultData = { cleared, score, stars, scoreFragments, pickedFragments: runFragments, awarded };
+    saveData.fragments += awarded;
+    if (cleared) {
+      const record = saveData.stages[stage.id];
+      record.stars[saveData.difficulty] = Math.max(record.stars[saveData.difficulty], stars);
+      if (!record.firstClearDifficulty) record.firstClearDifficulty = saveData.difficulty;
+    }
+    saveGame();
+    state = 'result';
+    playState = 'active';
+    losePointer();
   }
 
   // ---- 演出予算 -----------------------------------------------------------
@@ -545,6 +856,14 @@
       life: .18 + Math.random() * .18, max: .36, size: 2 + 3 * stretch, color: '#fff26b', spin: 0 });
   }
 
+  function fragmentAbsorb(x, y, value) {
+    const count = quality === 2 ? 3 + value * 2 : 2;
+    for (let i = 0; i < count; i++) {
+      addParticle({ kind: 'absorb', x, y, vx: (Math.random() - .5) * 90, vy: (Math.random() - .5) * 90,
+        life: .48 + i * .035, max: .62, size: 4 + Math.random() * 4, color: '#fff25d', spin: Math.random() * TAU });
+    }
+  }
+
   function glassChip(target, count = 7, force = 1) {
     const n = quality === 2 ? count : quality === 1 ? Math.ceil(count * .55) : 3;
     for (let i = 0; i < n; i++) {
@@ -567,8 +886,16 @@
       const p = particles[i];
       p.life -= dt;
       if (p.life <= 0) { particles.splice(i, 1); continue; }
-      p.vy += 330 * dt;
-      p.x += p.vx * dt; p.y += p.vy * dt; p.spin += dt * 7;
+      if (p.kind === 'absorb') {
+        const pull = 1 - Math.exp(-7 * dt);
+        p.x = lerp(p.x + p.vx * dt, view.w * .5 - 34, pull);
+        p.y = lerp(p.y + p.vy * dt, clamp(view.h * .10, 34, 62), pull);
+        p.vx *= .90; p.vy *= .90;
+      } else {
+        p.vy += 330 * dt;
+        p.x += p.vx * dt; p.y += p.vy * dt;
+      }
+      p.spin += dt * 7;
     }
   }
 
@@ -626,6 +953,7 @@
   }
 
   function wallSound() { tone(150, .07, 'sine', .05); tone(96, .10, 'triangle', .035, .015); }
+  function pickupSound(value) { tone(660 + value * 90, .16, 'triangle', .065); tone(990 + value * 110, .22, 'sine', .04, .04); }
   function warningSound(stretch) { tone(lerp(330, 620, stretch), .08, 'square', .022); }
   function stopWarning() { warningClock = 0; warningGain = null; }
   function cutSound() { tone(120, .45, 'sawtooth', .09); tone(72, .52, 'square', .06, .08); }
@@ -640,11 +968,15 @@
     if (!landscape) { drawPortraitHint(); return; }
     const sx = shake > 0 ? (Math.random() - .5) * shake : 0;
     const sy = shake > 0 ? (Math.random() - .5) * shake : 0;
+    uiHitAreas = [];
     ctx.save();
     ctx.translate(sx, sy);
     drawBackground();
     if (state === 'title') drawTitle();
-    else drawGame();
+    else if (state === 'stageSelect') drawStageSelect();
+    else if (state === 'workshop') drawWorkshop();
+    else if (state === 'playing') drawGame();
+    else if (state === 'result') drawResult();
     ctx.restore();
     if (flash > 0) {
       ctx.fillStyle = `rgba(255,255,255,${flash * .28})`;
@@ -699,7 +1031,7 @@
     roundedRect(-125, -26, 250, 52, 26); ctx.fillStyle = '#ff704b'; ctx.fill();
     ctx.strokeStyle = '#17385d'; ctx.lineWidth = 5; ctx.stroke();
     ctx.fillStyle = '#fff'; ctx.font = `900 ${clamp(view.h * .041, 18, 29)}px system-ui, sans-serif`;
-    ctx.fillText('タップで はじめる', 0, 1); ctx.restore();
+    ctx.fillText('はじめる', 0, 1); ctx.restore();
   }
 
   function drawTitlePendulum(x, y) {
@@ -708,7 +1040,277 @@
     const bx = x + Math.sin(swing) * len, by = y + Math.cos(swing) * len;
     ctx.strokeStyle = '#58447b'; ctx.lineWidth = 10; ctx.lineCap = 'round';
     ctx.beginPath(); ctx.moveTo(x, y - 20); ctx.lineTo(bx, by - 20); ctx.stroke();
-    drawPivot(x, y - 20, 0); drawBall(bx, by - 20);
+    drawPivot(x, y - 20, 0); drawBall(bx, by - 20, EQUIPMENT.balls[0], BASE_BALL_RADIUS);
+  }
+
+  function drawPanel(x, y, w, h, fill = 'rgba(255,255,255,.90)', radius = 22) {
+    roundedRect(x, y, w, h, radius); ctx.fillStyle = fill; ctx.fill();
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 5; ctx.stroke();
+  }
+
+  function drawFragmentIcon(x, y, size = 12, color = '#fff25d') {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = color; ctx.strokeStyle = '#17385d'; ctx.lineWidth = Math.max(2, size * .18);
+    roundedRect(-size * .58, -size * .58, size * 1.16, size * 1.16, size * .22); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.75)';
+    ctx.beginPath(); ctx.arc(-size * .18, -size * .20, size * .16, 0, TAU); ctx.fill(); ctx.restore();
+  }
+
+  function drawBalance(x, y, value, align = 'left') {
+    const w = 96, h = 40, left = align === 'right' ? x - w : x;
+    roundedRect(left, y - h * .5, w, h, 20); ctx.fillStyle = 'rgba(255,255,255,.90)'; ctx.fill();
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 4; ctx.stroke();
+    drawFragmentIcon(left + 22, y, 11);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#17385d';
+    ctx.font = `900 ${clamp(view.h * .038, 17, 25)}px system-ui, sans-serif`;
+    ctx.fillText(String(value), left + 42, y + 1);
+  }
+
+  function drawFlame(x, y, size, color) {
+    ctx.save(); ctx.translate(x, y);
+    ctx.fillStyle = color; ctx.strokeStyle = '#17385d'; ctx.lineWidth = Math.max(2, size * .12);
+    ctx.beginPath();
+    ctx.moveTo(0, size * .55); ctx.bezierCurveTo(-size * .62, size * .25, -size * .42, -size * .22, -size * .08, -size * .64);
+    ctx.bezierCurveTo(-size * .04, -size * .27, size * .28, -size * .17, size * .18, -size * .72);
+    ctx.bezierCurveTo(size * .68, -size * .22, size * .62, size * .32, 0, size * .55); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawDifficultySwitch(y) {
+    const bw = clamp(view.w * .092, 62, 86), bh = 43, gap = 10;
+    const total = bw * 3 + gap * 2, start = view.w * .5 - total * .5;
+    DIFFICULTIES.forEach((difficulty, index) => {
+      const x = start + index * (bw + gap), selected = saveData.difficulty === difficulty.id;
+      roundedRect(x, y, bw, bh, 18); ctx.fillStyle = selected ? difficulty.color : 'rgba(255,255,255,.72)'; ctx.fill();
+      ctx.strokeStyle = '#17385d'; ctx.lineWidth = selected ? 5 : 3; ctx.stroke();
+      const iconGap = 15, iconStart = x + bw * .5 - (difficulty.flames - 1) * iconGap * .5;
+      for (let i = 0; i < difficulty.flames; i++) drawFlame(iconStart + i * iconGap, y + bh * .52, 13, selected ? '#fff25d' : difficulty.color);
+      addHitArea('difficulty', x, y, bw, bh, difficulty.id);
+    });
+  }
+
+  function drawHammer(x, y, size) {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(-.68);
+    ctx.fillStyle = '#9a6542'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 4;
+    roundedRect(-size * .09, -size * .06, size * .18, size * .74, size * .08); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#71859a'; roundedRect(-size * .38, -size * .30, size * .76, size * .28, size * .08); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawLock(x, y, size) {
+    ctx.strokeStyle = '#17385d'; ctx.fillStyle = '#9bb3bd'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(x, y - size * .22, size * .30, Math.PI, TAU); ctx.stroke();
+    roundedRect(x - size * .42, y - size * .12, size * .84, size * .65, size * .12); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#17385d'; ctx.beginPath(); ctx.arc(x, y + size * .13, size * .08, 0, TAU); ctx.fill();
+  }
+
+  function drawStageSelect() {
+    drawBalance(view.w - 22, 35, saveData.fragments, 'right');
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#17385d';
+    ctx.font = `900 ${clamp(view.h * .064, 24, 40)}px system-ui, sans-serif`;
+    ctx.fillText('どこへ いく？', view.w * .5, 35);
+    drawDifficultySwitch(clamp(view.h * .13, 55, 76));
+
+    const margin = clamp(view.w * .055, 24, 52), gap = clamp(view.w * .025, 12, 28);
+    const panelY = clamp(view.h * .29, 100, 168), panelH = Math.min(view.h * .52, view.h - panelY - 70);
+    const panelW = (view.w - margin * 2 - gap * 2) / 3;
+    STAGES.forEach((stage, index) => {
+      const x = margin + index * (panelW + gap);
+      drawPanel(x, panelY, panelW, panelH, stage.locked ? 'rgba(220,235,240,.91)' : 'rgba(255,255,255,.93)');
+      if (stage.locked) {
+        drawLock(x + panelW * .5, panelY + panelH * .39, clamp(panelH * .22, 34, 54));
+        ctx.fillStyle = '#597184'; ctx.font = `900 ${clamp(view.h * .031, 14, 20)}px system-ui, sans-serif`;
+        ctx.fillText('じゅんびちゅう', x + panelW * .5, panelY + panelH * .68);
+        for (let i = 0; i < 3; i++) {
+          ctx.fillStyle = 'rgba(23,56,93,.13)'; ctx.strokeStyle = '#597184'; ctx.lineWidth = 2;
+          drawStar(x + panelW * .5 + (i - 1) * 30, panelY + panelH * .84, 11, 5, 5, true);
+        }
+      } else {
+        ctx.fillStyle = '#17385d'; ctx.font = `900 ${clamp(view.h * .105, 38, 68)}px system-ui, sans-serif`;
+        ctx.fillText(String(stage.id), x + panelW * .5, panelY + panelH * .36);
+        const stars = saveData.stages[stage.id].stars[saveData.difficulty];
+        for (let i = 0; i < 3; i++) {
+          ctx.fillStyle = i < stars ? '#fff25d' : 'rgba(23,56,93,.16)'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 3;
+          drawStar(x + panelW * .5 + (i - 1) * 34, panelY + panelH * .70, 13, 6, 5, true);
+        }
+        addHitArea('stage', x, panelY, panelW, panelH, index);
+      }
+    });
+
+    const workshopButton = { x: view.w - margin - 82, y: view.h - 62, w: 76, h: 50 };
+    roundedRect(workshopButton.x, workshopButton.y, workshopButton.w, workshopButton.h, 22);
+    ctx.fillStyle = '#ffb43a'; ctx.fill(); ctx.strokeStyle = '#17385d'; ctx.lineWidth = 5; ctx.stroke();
+    drawHammer(workshopButton.x + workshopButton.w * .5, workshopButton.y + workshopButton.h * .5, 38);
+    addHitArea('workshop', workshopButton.x, workshopButton.y, workshopButton.w, workshopButton.h);
+  }
+
+  function workshopLayout() {
+    const rightLeft = view.w * .60;
+    return {
+      listLeft: 22, listTop: clamp(view.h * .18, 68, 105), listRight: view.w * .57,
+      sandbox: {
+        left: rightLeft, right: view.w - 24,
+        top: clamp(view.h * .18, 68, 105), bottom: view.h - clamp(view.h * .18, 65, 96)
+      }
+    };
+  }
+
+  function resetWorkshopSandbox() {
+    const layout = workshopLayout();
+    workshop.bounds = { ...layout.sandbox };
+    const b = workshop.bounds, scale = BALANCE.workshopScale;
+    workshop.pivot.x = (b.left + b.right) * .5;
+    workshop.pivot.y = b.top + 35;
+    workshop.ball.x = workshop.pivot.x - params.naturalLength * scale * .30;
+    workshop.ball.y = workshop.pivot.y + params.naturalLength * scale * .90;
+    workshop.ball.vx = 25;
+    workshop.ball.vy = 0;
+    workshop.overLimit = 0;
+  }
+
+  function workshopPhysicsStep(dt) {
+    const b = workshop.bounds, testBall = equippedBall(true), testRubber = equippedRubber(true);
+    const scale = BALANCE.workshopScale;
+    const natural = params.naturalLength * scale;
+    const breakLength = params.breakLength * testRubber.breakScale * scale;
+    const dx = workshop.ball.x - workshop.pivot.x, dy = workshop.ball.y - workshop.pivot.y;
+    const dist = Math.max(.001, Math.hypot(dx, dy));
+    let ax = 0, ay = params.gravity * scale / testBall.mass;
+    if (dist > natural) {
+      const tension = params.spring * (dist - natural) / testBall.mass;
+      ax -= tension * dx / dist; ay -= tension * dy / dist;
+    }
+    ax -= params.damping * workshop.ball.vx; ay -= params.damping * workshop.ball.vy;
+    workshop.ball.vx += ax * dt; workshop.ball.vy += ay * dt;
+    workshop.ball.x += workshop.ball.vx * dt; workshop.ball.y += workshop.ball.vy * dt;
+    const radius = 17 * testBall.radiusScale;
+    if (workshop.ball.x - radius < b.left) { workshop.ball.x = b.left + radius; workshop.ball.vx = Math.abs(workshop.ball.vx) * .72; }
+    if (workshop.ball.x + radius > b.right) { workshop.ball.x = b.right - radius; workshop.ball.vx = -Math.abs(workshop.ball.vx) * .72; }
+    if (workshop.ball.y - radius < b.top) { workshop.ball.y = b.top + radius; workshop.ball.vy = Math.abs(workshop.ball.vy) * .72; }
+    if (workshop.ball.y + radius > b.bottom) { workshop.ball.y = b.bottom - radius; workshop.ball.vy = -Math.abs(workshop.ball.vy) * .72; }
+    const stretch = clamp((dist - natural) / Math.max(1, breakLength - natural), 0, 1);
+    workshop.overLimit = stretch >= 1 ? workshop.overLimit + dt : 0;
+    if (workshop.overLimit >= CUT_GRACE_TIME) resetWorkshopSandbox();
+  }
+
+  function drawBackButton() {
+    const x = 20, y = 20, w = 58, h = 42;
+    roundedRect(x, y, w, h, 19); ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = '#17385d'; ctx.lineWidth = 4; ctx.stroke();
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(x + 37, y + 11); ctx.lineTo(x + 23, y + 21); ctx.lineTo(x + 37, y + 31); ctx.stroke();
+    addHitArea('backToStages', x, y, w, h);
+  }
+
+  function drawEquipmentIcon(item, x, y, size) {
+    if (EQUIPMENT.balls.includes(item)) {
+      ctx.fillStyle = item.color; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(x, y, size * item.radiusScale * .38, 0, TAU); ctx.fill(); ctx.stroke();
+      if (item.id === 'ironBall') {
+        ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.beginPath(); ctx.arc(x - size * .12, y - size * .12, size * .09, 0, TAU); ctx.fill();
+      }
+    } else {
+      ctx.strokeStyle = item.color; ctx.lineWidth = item.id === 'glowRubber' ? 9 : 6; ctx.lineCap = 'round';
+      if (item.id === 'glowRubber') { ctx.shadowColor = '#fff25d'; ctx.shadowBlur = 14; }
+      ctx.beginPath(); ctx.moveTo(x - size * .34, y + size * .30); ctx.quadraticCurveTo(x, y - size * .38, x + size * .34, y + size * .30); ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+  }
+
+  function drawWorkshopItem(item, x, y, w, h, selected) {
+    roundedRect(x, y, w, h, 15);
+    ctx.fillStyle = selected ? '#fff2a6' : saveData.owned.includes(item.id) ? '#fff' : 'rgba(255,255,255,.78)'; ctx.fill();
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = selected ? 5 : 3; ctx.stroke();
+    drawEquipmentIcon(item, x + 29, y + h * .5, 38);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#17385d';
+    ctx.font = `900 ${clamp(view.h * .028, 13, 18)}px system-ui, sans-serif`;
+    ctx.fillText(item.name, x + 54, y + h * .38);
+    drawFragmentIcon(x + 64, y + h * .72, 6.5);
+    ctx.font = `900 ${clamp(view.h * .024, 12, 16)}px system-ui, sans-serif`;
+    ctx.fillText(String(item.price), x + 77, y + h * .72);
+    if (saveData.owned.includes(item.id)) {
+      ctx.fillStyle = '#55c978'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x + w - 14, y + h - 14, 7, 0, TAU); ctx.fill(); ctx.stroke();
+    }
+    addHitArea('workshopItem', x, y, w, h, item.id);
+  }
+
+  function drawWorkshopSandbox() {
+    const b = workshop.bounds, testBall = equippedBall(true), testRubber = equippedRubber(true);
+    drawPanel(b.left, b.top, b.right - b.left, b.bottom - b.top, 'rgba(225,247,255,.92)', 18);
+    ctx.save(); roundedRect(b.left, b.top, b.right - b.left, b.bottom - b.top, 18); ctx.clip();
+    const scale = BALANCE.workshopScale;
+    const natural = params.naturalLength * scale, breakLength = params.breakLength * testRubber.breakScale * scale;
+    const dist = Math.hypot(workshop.ball.x - workshop.pivot.x, workshop.ball.y - workshop.pivot.y);
+    const stretch = clamp((dist - natural) / Math.max(1, breakLength - natural), 0, 1);
+    const danger = testRubber.warningStart;
+    if (testRubber.glow > 1 && stretch >= danger) {
+      ctx.shadowColor = '#fff25d'; ctx.shadowBlur = 12 * testRubber.glow;
+    }
+    ctx.strokeStyle = stretch >= danger ? '#f2384d' : testRubber.color;
+    ctx.lineWidth = 5 + stretch * 6; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(workshop.pivot.x, workshop.pivot.y); ctx.lineTo(workshop.ball.x, workshop.ball.y); ctx.stroke();
+    ctx.shadowBlur = 0;
+    drawPivot(workshop.pivot.x, workshop.pivot.y, stretch);
+    ctx.fillStyle = testBall.color; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(workshop.ball.x, workshop.ball.y, 17 * testBall.radiusScale, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawWorkshop() {
+    drawBackButton(); drawBalance(view.w - 22, 40, saveData.fragments, 'right');
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#17385d';
+    ctx.font = `900 ${clamp(view.h * .057, 23, 36)}px system-ui, sans-serif`; ctx.fillText('こうぼう', view.w * .5, 38);
+    const layout = workshopLayout(); workshop.bounds = { ...layout.sandbox };
+    const gap = 8, columnGap = 10, colW = (layout.listRight - layout.listLeft - columnGap) * .5;
+    const rowH = clamp((view.h - layout.listTop - 30 - gap * 2) / 3, 52, 72);
+    EQUIPMENT.balls.forEach((item, index) => drawWorkshopItem(item, layout.listLeft, layout.listTop + index * (rowH + gap), colW, rowH, workshopPreview.ball === item.id));
+    EQUIPMENT.rubbers.forEach((item, index) => drawWorkshopItem(item, layout.listLeft + colW + columnGap, layout.listTop + index * (rowH + gap), colW, rowH, workshopPreview.rubber === item.id));
+    drawWorkshopSandbox();
+
+    const selected = [findEquipment(workshopPreview.ball), findEquipment(workshopPreview.rubber)];
+    const price = selected.filter(item => !saveData.owned.includes(item.id)).reduce((sum, item) => sum + item.price, 0);
+    const equipped = workshopPreview.ball === saveData.equipment.ball && workshopPreview.rubber === saveData.equipment.rubber;
+    const bx = workshop.bounds.left + 8, by = workshop.bounds.bottom + 10, bw = workshop.bounds.right - workshop.bounds.left - 16, bh = 48;
+    roundedRect(bx, by, bw, bh, 22); ctx.fillStyle = price > saveData.fragments ? '#9bb3bd' : equipped ? '#55c978' : '#ff704b'; ctx.fill();
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 5; ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.font = `900 ${clamp(view.h * .035, 16, 23)}px system-ui, sans-serif`; ctx.textAlign = 'center';
+    if (price > 0) {
+      ctx.fillText(price > saveData.fragments ? 'たりない' : 'かう', bx + bw * .48, by + bh * .52);
+      drawFragmentIcon(bx + bw * .70, by + bh * .5, 8); ctx.textAlign = 'left'; ctx.fillStyle = '#17385d'; ctx.fillText(String(price), bx + bw * .77, by + bh * .52);
+    } else ctx.fillText(equipped ? 'つけた' : 'つける', bx + bw * .5, by + bh * .52);
+    addHitArea('workshopApply', bx, by, bw, bh);
+  }
+
+  function drawResult() {
+    const data = resultData;
+    if (!data) return;
+    const panelW = Math.min(view.w * .72, 650), panelH = view.h * .76;
+    const x = (view.w - panelW) * .5, y = view.h * .10;
+    drawPanel(x, y, panelW, panelH, 'rgba(255,255,255,.94)', 28);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = data.cleared ? '#ff704b' : '#597184';
+    ctx.font = `900 ${clamp(view.h * .072, 28, 46)}px system-ui, sans-serif`;
+    ctx.fillText(data.cleared ? 'できた！' : 'ざんねん', view.w * .5, y + panelH * .14);
+    for (let i = 0; i < 3; i++) {
+      ctx.fillStyle = i < data.stars ? '#fff25d' : 'rgba(23,56,93,.14)'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 4;
+      drawStar(view.w * .5 + (i - 1) * 62, y + panelH * .31, 24, 11, 5, true);
+    }
+    ctx.fillStyle = '#17385d'; ctx.font = `900 ${clamp(view.h * .055, 22, 34)}px system-ui, sans-serif`;
+    ctx.fillText(String(data.score).padStart(4, '0'), view.w * .5, y + panelH * .47);
+    const rowY = y + panelH * .61, rowStart = view.w * .5 - (data.cleared ? 132 : 166);
+    drawFragmentIcon(rowStart, rowY, 11); ctx.textAlign = 'left';
+    ctx.font = `900 ${clamp(view.h * .033, 15, 21)}px system-ui, sans-serif`;
+    ctx.fillText(String(data.scoreFragments), rowStart + 22, rowY);
+    ctx.fillText('+', rowStart + 80, rowY);
+    drawFragmentIcon(rowStart + 112, rowY, 11); ctx.fillText(String(data.pickedFragments), rowStart + 134, rowY);
+    let resultCursor = rowStart + 186;
+    if (!data.cleared) { ctx.fillText('× 1/2', resultCursor, rowY); resultCursor += 67; }
+    ctx.fillText('=', resultCursor, rowY); drawFragmentIcon(resultCursor + 36, rowY, 13);
+    ctx.font = `900 ${clamp(view.h * .043, 18, 28)}px system-ui, sans-serif`; ctx.fillText(String(data.awarded), resultCursor + 61, rowY);
+    const bx = view.w * .5 - 100, by = y + panelH * .75, bw = 200, bh = 52;
+    roundedRect(bx, by, bw, bh, 25); ctx.fillStyle = '#ff704b'; ctx.fill(); ctx.strokeStyle = '#17385d'; ctx.lineWidth = 5; ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = `900 ${clamp(view.h * .038, 17, 25)}px system-ui, sans-serif`;
+    ctx.fillText('つぎへ', view.w * .5, by + bh * .53); addHitArea('resultNext', bx, by, bw, bh);
+    drawBalance(view.w - 22, 38, saveData.fragments, 'right');
   }
 
   function drawField() {
@@ -754,6 +1356,7 @@
       ctx.beginPath(); ctx.arc(item.x, item.y, ball.r * item.life * .55, 0, TAU); ctx.fill();
     }
     ctx.globalAlpha = 1;
+    for (const item of stageFragments) if (!item.collected) drawStageFragment(item);
     for (const target of targets) if (!target.dead) drawTarget(target);
     drawRubber(stretch);
     drawPointerGuide();
@@ -761,27 +1364,38 @@
     drawBall(ball.x, ball.y);
     drawParticles();
     drawHud(stretch);
-    if (idleTime > .28 && state !== 'clear') drawPauseHint();
-    if (state === 'cut') drawCutOverlay();
-    if (state === 'clear') drawClearOverlay();
+    if (idleTime > .28 && playState !== 'clear') drawPauseHint();
+    if (playState === 'cut') drawCutOverlay();
+    if (playState === 'clear') drawClearOverlay();
+  }
+
+  function drawStageFragment(item) {
+    const pulse = 1 + Math.sin(sectionTime * 5 + item.pulse) * .12;
+    ctx.save(); ctx.translate(item.x, item.y); ctx.scale(pulse, pulse);
+    ctx.shadowColor = '#fff25d'; ctx.shadowBlur = 12;
+    drawFragmentIcon(0, 0, BALANCE.pickupVisualRadius + item.value, item.value > 1 ? '#fff25d' : '#ffe58a');
+    ctx.restore();
   }
 
   function drawRubber(stretch) {
-    if (state === 'cut' && cutAt) {
+    if (playState === 'cut' && cutAt) {
       drawRubberPart(pivot.x, pivot.y, lerp(pivot.x, ball.x, .46), lerp(pivot.y, ball.y, .46), stretch);
       drawRubberPart(lerp(pivot.x, ball.x, .59), lerp(pivot.y, ball.y, .59), ball.x, ball.y, stretch);
       return;
     }
-    let jitter = stretch >= DANGER_STRETCH ? (stretch - DANGER_STRETCH) * 20 : 0;
+    const danger = effectiveDangerStretch(), rubber = equippedRubber();
+    let jitter = stretch >= danger ? (stretch - danger) * 20 : 0;
     if (!pointer.active) jitter = 0;
     const nx = ball.y - pivot.y, ny = -(ball.x - pivot.x);
     const nlen = Math.max(1, Math.hypot(nx, ny));
     const jx = nx / nlen * Math.sin(sectionTime * 70) * jitter;
     const jy = ny / nlen * Math.sin(sectionTime * 70) * jitter;
-    const color = stretch < .55 ? '#5948bc' : stretch < DANGER_STRETCH ? '#ff9d26' : '#f2384d';
+    const color = stretch < .55 ? rubber.color : stretch < danger ? '#ff9d26' : '#f2384d';
+    if (rubber.glow > 1 && stretch >= danger) { ctx.shadowColor = '#fff25d'; ctx.shadowBlur = 12 * rubber.glow; }
     ctx.strokeStyle = '#17385d'; ctx.lineWidth = 9 + stretch * 9; ctx.lineCap = 'round';
     ctx.beginPath(); ctx.moveTo(pivot.x, pivot.y);
     ctx.quadraticCurveTo((pivot.x + ball.x) * .5 + jx, (pivot.y + ball.y) * .5 + jy, ball.x, ball.y); ctx.stroke();
+    ctx.shadowBlur = 0;
     ctx.strokeStyle = color; ctx.lineWidth = 4 + stretch * 7;
     ctx.beginPath(); ctx.moveTo(pivot.x, pivot.y);
     ctx.quadraticCurveTo((pivot.x + ball.x) * .5 + jx, (pivot.y + ball.y) * .5 + jy, ball.x, ball.y); ctx.stroke();
@@ -802,17 +1416,18 @@
   }
 
   function drawPivot(x, y, stretch) {
-    const pulse = stretch >= DANGER_STRETCH ? 1 + Math.sin(sectionTime * 18) * .10 * stretch : 1;
+    const danger = state === 'workshop' ? effectiveDangerStretch(true) : effectiveDangerStretch();
+    const pulse = stretch >= danger ? 1 + Math.sin(sectionTime * 18) * .10 * stretch : 1;
     ctx.save(); ctx.translate(x, y); ctx.scale(pulse, pulse);
-    ctx.fillStyle = stretch >= DANGER_STRETCH ? '#ff4b4f' : '#f9d94c'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 5;
+    ctx.fillStyle = stretch >= danger ? '#ff4b4f' : '#f9d94c'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 5;
     ctx.beginPath(); ctx.arc(0, 0, 15, 0, TAU); ctx.fill(); ctx.stroke();
     ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(-4, -4, 4, 0, TAU); ctx.fill(); ctx.restore();
   }
 
-  function drawBall(x, y) {
+  function drawBall(x, y, item = equippedBall(), radius = ball.r) {
     ctx.save(); ctx.translate(x, y);
-    ctx.fillStyle = '#654fd5'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 6;
-    ctx.beginPath(); ctx.arc(0, 0, ball.r, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = item.color; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.arc(0, 0, radius, 0, TAU); ctx.fill(); ctx.stroke();
     ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.ellipse(-7, -5, 5, 7, 0, 0, TAU); ctx.ellipse(7, -5, 5, 7, 0, 0, TAU); ctx.fill();
     ctx.fillStyle = '#17385d'; ctx.beginPath(); ctx.arc(-6, -4, 2.6, 0, TAU); ctx.arc(8, -4, 2.6, 0, TAU); ctx.fill();
     ctx.strokeStyle = '#17385d'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 3, 8, .1, Math.PI - .1); ctx.stroke();
@@ -966,6 +1581,7 @@
       ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.spin); ctx.globalAlpha = alpha;
       ctx.fillStyle = p.color; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 2;
       if (p.kind === 'star') drawStar(0, 0, p.size, p.size * .45, 5, true);
+      else if (p.kind === 'absorb') drawFragmentIcon(0, 0, p.size, p.color);
       else if (p.kind === 'chip') {
         ctx.beginPath(); ctx.moveTo(0, -p.size); ctx.lineTo(p.size, p.size); ctx.lineTo(-p.size, p.size * .5); ctx.closePath(); ctx.fill();
       } else { ctx.fillRect(-p.size * .5, -p.size * 1.5, p.size, p.size * 3); }
@@ -993,6 +1609,14 @@
       ctx.fillStyle = i < 4 - alive ? '#fff25d' : 'rgba(23,56,93,.20)';
       ctx.strokeStyle = '#17385d'; ctx.lineWidth = 2;
       drawStar(x + i * 23 + 8, y + 30, 8, 3.8, 5, true);
+    }
+    const fragmentX = view.w * .5 - 34;
+    drawFragmentIcon(fragmentX, y, 10);
+    ctx.fillStyle = '#17385d'; ctx.font = `900 ${clamp(view.h * .038, 17, 25)}px system-ui, sans-serif`;
+    ctx.fillText(String(saveData.fragments) + (runFragments ? ' +' + runFragments : ''), fragmentX + 20, y + 1);
+    for (let i = 0; i < revivesLeft; i++) {
+      ctx.fillStyle = '#ff704b'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x + 110 + i * 17, y + 31, 6, 0, TAU); ctx.fill(); ctx.stroke();
     }
     drawStretchMeter(view.w - clamp(view.w * .18, 150, 220), y - 15, clamp(view.w * .13, 110, 170), 22, stretch);
     if (combo > 0) drawComboRing(view.w * .50, view.h * .15);
@@ -1022,6 +1646,11 @@
     ctx.strokeStyle = '#17385d'; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(x + w * GLASS_SHATTER_STRETCH, y - 3);
     ctx.lineTo(x + w * GLASS_SHATTER_STRETCH, y + h + 3); ctx.stroke();
+    const warningStart = effectiveDangerStretch();
+    if (warningStart < GLASS_SHATTER_STRETCH) {
+      ctx.strokeStyle = '#fff25d'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(x + w * warningStart, y - 2); ctx.lineTo(x + w * warningStart, y + h + 2); ctx.stroke();
+    }
   }
 
   function drawComboRing(x, y) {
@@ -1070,7 +1699,7 @@
     roundedRect(clearButton.x, clearButton.y, clearButton.w, clearButton.h, 29);
     ctx.fillStyle = ready ? '#ff704b' : '#9ab3bd'; ctx.fill(); ctx.strokeStyle = '#17385d'; ctx.lineWidth = 5; ctx.stroke();
     ctx.fillStyle = '#fff'; ctx.font = `900 ${clamp(view.h * .042, 18, 28)}px system-ui, sans-serif`;
-    ctx.fillText('もう いっかい', view.w * .5, clearButton.y + clearButton.h * .53);
+    ctx.fillText('つぎへ', view.w * .5, clearButton.y + clearButton.h * .53);
   }
 
   function pointInButton(x, y) {
@@ -1153,16 +1782,24 @@
     if (slowFrames > 8) { quality = Math.max(0, quality - 1); slowFrames = 0; }
     if (healthyFrames > 600) { quality = Math.min(2, quality + 1); healthyFrames = 0; }
 
-    const simulationActive = landscape && pointer.active && (state === 'playing' || state === 'cut' || state === 'clear');
+    const simulationActive = landscape && pointer.active && state === 'playing';
     if (simulationActive) {
       accumulator = Math.min(accumulator + rawDelta, FIXED_DT * MAX_SUBSTEPS);
       let steps = 0;
       while (accumulator >= FIXED_DT && steps < MAX_SUBSTEPS) {
-        if (state === 'playing') physicsStep(FIXED_DT, now - accumulator * 1000);
+        if (playState === 'active') {
+          // Easy は params を変えず、危険帯にいる固定刻みだけ時間を縮める。
+          const timeScale = saveData.difficulty === 'easy' && stretchRatioAt() >= BALANCE.easySlowTrigger
+            ? BALANCE.easyTimeScale : 1;
+          physicsStep(FIXED_DT * timeScale, now - accumulator * 1000);
+        }
         else {
           stateTime += FIXED_DT;
           updateParticles(FIXED_DT);
-          if (state === 'cut' && stateTime >= 1.15) resetSection();
+          if (playState === 'cut' && stateTime >= BALANCE.cutResultDelay) {
+            if (revivesLeft > 0) { revivesLeft--; resetSection(); }
+            else finishStage(false);
+          }
         }
         accumulator -= FIXED_DT;
         steps++;
@@ -1170,6 +1807,13 @@
     } else {
       accumulator = 0;
     }
+    if (landscape && state === 'workshop') {
+      workshopAccumulator = Math.min(workshopAccumulator + rawDelta, FIXED_DT * MAX_SUBSTEPS);
+      let workshopSteps = 0;
+      while (workshopAccumulator >= FIXED_DT && workshopSteps < MAX_SUBSTEPS) {
+        workshopPhysicsStep(FIXED_DT); workshopAccumulator -= FIXED_DT; workshopSteps++;
+      }
+    } else workshopAccumulator = 0;
     shake = Math.max(0, shake - rawDelta * 35);
     flash = Math.max(0, flash - rawDelta * 2.8);
     draw();
@@ -1179,6 +1823,7 @@
   buildDebugPanel();
   window.addEventListener('resize', resize);
   window.addEventListener('orientationchange', () => setTimeout(resize, 80));
+  syncEquippedBall();
   resize();
   requestAnimationFrame(frame);
   </script>
