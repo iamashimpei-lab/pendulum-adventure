@@ -51,12 +51,14 @@
   const GLASS_SHATTER_STRETCH = .72;
   const DANGER_STRETCH = GLASS_SHATTER_STRETCH;
   const GLASS_REACTION_TIME = 1;
+  // 限界は瞬間でなく、一定時間超え続けたときだけ切断する (2026-08-09 実機テストで決定)
+  const CUT_GRACE_TIME = .12;
   const params = {
     gravity: 1040,
-    spring: 42,
-    damping: 0.48,
+    spring: 36,
+    damping: 0.58,
     naturalLength: 148,
-    breakLength: 286,
+    breakLength: 370,
     pivotMaxSpeed: 760,
     pivotMaxAccel: 3600,
     inputSmoothing: 14
@@ -66,7 +68,7 @@
     ['spring', 'ばね', 10, 90, 1, 0],
     ['damping', 'げんすい', 0.05, 1.5, 0.01, 2],
     ['naturalLength', 'しぜんちょう', 90, 230, 1, 0],
-    ['breakLength', 'せつだんちょう', 190, 390, 1, 0],
+    ['breakLength', 'せつだんちょう', 190, 460, 1, 0],
     ['pivotMaxSpeed', 'してんそくど', 280, 1300, 10, 0]
   ];
   const debugControls = {};
@@ -88,6 +90,7 @@
   let flash = 0;
   let warningClock = 0;
   let deepMeterFlash = 0;
+  let overLimitTime = 0;
   let cutAt = null;
   let clearButton = { x: 0, y: 0, w: 0, h: 0 };
 
@@ -96,7 +99,7 @@
     prevSample: null, nextSample: null
   };
   const pivot = { x: 0, y: 0, vx: 0, vy: 0, tx: 0, ty: 0 };
-  const ball = { x: 0, y: 0, px: 0, py: 0, vx: 0, vy: 0, r: 22 };
+  const ball = { x: 0, y: 0, px: 0, py: 0, vx: 0, vy: 0, r: 26 };
   let targets = [];
   const particles = [];
   const trail = [];
@@ -164,7 +167,7 @@
   function buildTargets(preserveDead = false) {
     const oldState = preserveDead ? targets.map(t => ({ dead: t.dead, damage: t.damage })) : [];
     const h = view.h, w = view.w;
-    const radius = clamp(h * .052, 20, 34);
+    const radius = clamp(h * .062, 24, 40);
     targets = [
       makeTarget(w * .34, h * .60, radius, '#ffd43b', 0),
       makeTarget(w * .52, h * .70, radius, '#52d273', 1),
@@ -191,6 +194,7 @@
     combo = 0;
     comboTime = 0;
     deepMeterFlash = 0;
+    overLimitTime = 0;
     cutAt = null;
     particles.length = 0;
     trail.length = 0;
@@ -338,7 +342,12 @@
     sweepTargets(oldX, oldY, ball.x, ball.y, dt);
 
     const stretch = stretchRatioAt();
-    if (stretch >= 1) cutRubber();
+    if (stretch >= 1) {
+      overLimitTime += dt;
+      if (overLimitTime >= CUT_GRACE_TIME) cutRubber();
+    } else {
+      overLimitTime = 0;
+    }
     if (combo > 0) {
       comboTime -= dt;
       if (comboTime <= 0) {
@@ -427,11 +436,7 @@
     // 押し当てたままの多重判定を防ぐ。離れるまで全経路で再判定しない。
     target.touching = true;
 
-    // 限界到達と命中が同じ刻みに来ても、クリアより切断を優先する。
-    if (stretch >= 1) {
-      cutRubber();
-      return;
-    }
+    // 限界超過中でも猶予時間内の命中は成立させる (切断は physicsStep の猶予タイマーが判定)。
 
     // 通常の的は速度に関係なく、触れた時点の伸びだけを得点へ反映して破壊する。
     if (!target.glass) {
