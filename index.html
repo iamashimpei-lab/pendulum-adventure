@@ -1,0 +1,953 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="format-detection" content="telephone=no">
+  <title>ふりこの だいぼうけん</title>
+  <style>
+    :root { color-scheme: only light; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      width: 100%; height: 100%; margin: 0; overflow: hidden;
+      background: #75d9ff; touch-action: none; overscroll-behavior: none;
+      -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+      font-family: system-ui, -apple-system, "Hiragino Maru Gothic ProN", sans-serif;
+    }
+    canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+    #debug {
+      position: fixed; z-index: 4; top: max(8px, env(safe-area-inset-top));
+      left: max(8px, env(safe-area-inset-left)); width: min(310px, 44vw);
+      max-height: calc(100vh - 16px); overflow: auto; padding: 10px 12px;
+      border: 3px solid #17385d; border-radius: 14px; background: rgba(255,255,255,.94);
+      color: #17385d; font-size: 12px; font-weight: 800; box-shadow: 0 5px 0 rgba(23,56,93,.25);
+    }
+    #debug[hidden] { display: none; }
+    #debug label { display: grid; grid-template-columns: 1fr 58px; gap: 4px 8px; margin: 3px 0; }
+    #debug input { grid-column: 1 / 3; width: 100%; accent-color: #ff6d3a; }
+    #debug output { text-align: right; font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <canvas id="game" aria-label="ふりこの だいぼうけん"></canvas>
+  <section id="debug" hidden aria-label="かいはつ パラメータ"></section>
+  <script>
+  'use strict';
+
+  // ---- 基本設定 -----------------------------------------------------------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+  const debugPanel = document.getElementById('debug');
+  const TAU = Math.PI * 2;
+  const FIXED_DT = 1 / 120;
+  const MAX_SUBSTEPS = 6;
+  const PARTICLE_BUDGET = 96;
+  const TRAIL_BUDGET = 34;
+  const VOICE_BUDGET = 8;
+  const COMBO_WINDOW = 2.05;
+  const params = {
+    gravity: 1040,
+    spring: 42,
+    damping: 0.48,
+    naturalLength: 148,
+    breakLength: 286,
+    speedThreshold: 390,
+    pivotMaxSpeed: 760,
+    pivotMaxAccel: 3600,
+    inputSmoothing: 14
+  };
+  const parameterSpec = [
+    ['gravity', 'じゅうりょく', 300, 1800, 10, 0],
+    ['spring', 'ばね', 10, 90, 1, 0],
+    ['damping', 'げんすい', 0.05, 1.5, 0.01, 2],
+    ['naturalLength', 'しぜんちょう', 90, 230, 1, 0],
+    ['breakLength', 'せつだんちょう', 190, 390, 1, 0],
+    ['speedThreshold', 'そくどしきい', 180, 720, 5, 0],
+    ['pivotMaxSpeed', 'してんそくど', 280, 1300, 10, 0]
+  ];
+  const debugControls = {};
+
+  const view = { w: 1, h: 1, dpr: 1 };
+  let state = 'title';
+  let landscape = true;
+  let lastFrame = performance.now();
+  let accumulator = 0;
+  let sectionTime = 0;
+  let stateTime = 0;
+  let score = 0;
+  let combo = 0;
+  let comboTime = 0;
+  let quality = 2;
+  let slowFrames = 0;
+  let healthyFrames = 0;
+  let shake = 0;
+  let flash = 0;
+  let warningClock = 0;
+  let cutAt = null;
+  let clearButton = { x: 0, y: 0, w: 0, h: 0 };
+
+  const pointer = {
+    active: false, id: null, x: 0, y: 0,
+    prevSample: null, nextSample: null
+  };
+  const pivot = { x: 0, y: 0, vx: 0, vy: 0, tx: 0, ty: 0 };
+  const ball = { x: 0, y: 0, px: 0, py: 0, vx: 0, vy: 0, r: 22 };
+  let targets = [];
+  const particles = [];
+  const trail = [];
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const length = (x, y) => Math.hypot(x, y);
+  const roundedRect = (x, y, w, h, r) => {
+    const rr = Math.min(r, w * .5, h * .5);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.lineTo(x + w - rr, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+    ctx.lineTo(x + w, y + h - rr);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+    ctx.lineTo(x + rr, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+    ctx.lineTo(x, y + rr);
+    ctx.quadraticCurveTo(x, y, x + rr, y);
+    ctx.closePath();
+  };
+
+  // ---- 画面と配置 ---------------------------------------------------------
+  function resize() {
+    view.w = Math.max(1, window.innerWidth);
+    view.h = Math.max(1, window.innerHeight);
+    landscape = view.w > view.h;
+    const pixelCap = Math.sqrt(3200000 / (view.w * view.h));
+    view.dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1, pixelCap));
+    canvas.width = Math.round(view.w * view.dpr);
+    canvas.height = Math.round(view.h * view.dpr);
+    canvas.style.width = view.w + 'px';
+    canvas.style.height = view.h + 'px';
+    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+    if (!landscape) {
+      debugPanel.hidden = true;
+      if (pointer.active) losePointer();
+    }
+    if (!pivot.x || state === 'title') placeStart(false);
+    buildTargets(true);
+  }
+
+  function safeInsets() {
+    const side = clamp(view.w * .035, 28, 58);
+    return { left: side, right: view.w - side, top: 24, bottom: view.h - 24 };
+  }
+
+  function placeStart(resetBall = true) {
+    pivot.x = view.w * .50;
+    pivot.y = view.h * .25;
+    pivot.vx = pivot.vy = 0;
+    pivot.tx = pivot.x;
+    pivot.ty = pivot.y;
+    if (resetBall) {
+      const natural = effectiveNaturalLength();
+      ball.x = pivot.x - natural * .30;
+      ball.y = pivot.y + natural * .90;
+      ball.px = ball.x;
+      ball.py = ball.y;
+      ball.vx = 30;
+      ball.vy = 0;
+    }
+  }
+
+  function buildTargets(preserveDead = false) {
+    const oldDead = preserveDead ? targets.map(t => t.dead) : [];
+    const h = view.h, w = view.w;
+    const radius = clamp(h * .052, 20, 34);
+    targets = [
+      makeTarget(w * .34, h * .60, radius, '#ffd43b', 0),
+      makeTarget(w * .52, h * .70, radius, '#52d273', 1),
+      makeTarget(w * .67, h * .54, radius, '#ff7a59', 2),
+      makeTarget(w * .82, h * .76, radius * 1.08, '#75d9ff', 3, true)
+    ];
+    targets.forEach((t, i) => t.dead = oldDead[i] || false);
+  }
+
+  function makeTarget(x, y, r, color, id, glass = false) {
+    return { x, y, r, color, id, glass, dead: false, touching: false, pulse: Math.random() * TAU };
+  }
+
+  function resetSection() {
+    sectionTime = 0;
+    stateTime = 0;
+    score = 0;
+    combo = 0;
+    comboTime = 0;
+    cutAt = null;
+    particles.length = 0;
+    trail.length = 0;
+    buildTargets(false);
+    placeStart(true);
+    state = 'playing';
+    accumulator = 0;
+  }
+
+  function effectiveNaturalLength() {
+    return clamp(params.naturalLength, 80, Math.max(90, params.breakLength - 24));
+  }
+
+  function stretchRatioAt(bx = ball.x, by = ball.y, px = pivot.x, py = pivot.y) {
+    const current = Math.hypot(bx - px, by - py);
+    const natural = effectiveNaturalLength();
+    return clamp((current - natural) / Math.max(1, params.breakLength - natural), 0, 1);
+  }
+
+  // ---- 入力: 時刻付き補間、平滑化、速度・加速度制限 ----------------------
+  function pointerPosition(event) {
+    return { x: event.clientX, y: event.clientY, time: event.timeStamp || performance.now() };
+  }
+
+  function offsetPoint(sample) {
+    const vertical = clamp(view.h * .15, 56, 72);
+    const towardCenter = clamp((view.w * .5 - sample.x) * .045, -18, 18);
+    return {
+      x: clamp(sample.x + towardCenter, 24, view.w - 24),
+      y: clamp(sample.y - vertical, 22, view.h - 40),
+      time: sample.time
+    };
+  }
+
+  function recordPointer(event) {
+    const sample = offsetPoint(pointerPosition(event));
+    pointer.x = event.clientX;
+    pointer.y = event.clientY;
+    pointer.prevSample = pointer.nextSample || sample;
+    pointer.nextSample = sample;
+  }
+
+  function sampledTarget(now) {
+    const a = pointer.prevSample;
+    const b = pointer.nextSample;
+    if (!a || !b || b.time <= a.time) return b || { x: pivot.tx, y: pivot.ty };
+    const renderBehind = now - 12;
+    const t = clamp((renderBehind - a.time) / (b.time - a.time), 0, 1);
+    return { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) };
+  }
+
+  function updatePivot(dt, now) {
+    const target = sampledTarget(now);
+    const smoothing = 1 - Math.exp(-params.inputSmoothing * dt);
+    pivot.tx += (target.x - pivot.tx) * smoothing;
+    pivot.ty += (target.y - pivot.ty) * smoothing;
+    const response = .085;
+    let dvx = (pivot.tx - pivot.x) / response;
+    let dvy = (pivot.ty - pivot.y) / response;
+    const desiredSpeed = Math.hypot(dvx, dvy);
+    if (desiredSpeed > params.pivotMaxSpeed) {
+      const s = params.pivotMaxSpeed / desiredSpeed;
+      dvx *= s; dvy *= s;
+    }
+    let ax = dvx - pivot.vx;
+    let ay = dvy - pivot.vy;
+    const change = Math.hypot(ax, ay);
+    const maxChange = params.pivotMaxAccel * dt;
+    if (change > maxChange) {
+      const s = maxChange / change;
+      ax *= s; ay *= s;
+    }
+    pivot.vx += ax;
+    pivot.vy += ay;
+    pivot.x = clamp(pivot.x + pivot.vx * dt, 20, view.w - 20);
+    pivot.y = clamp(pivot.y + pivot.vy * dt, 18, view.h - 42);
+  }
+
+  function losePointer() {
+    pointer.active = false;
+    pointer.id = null;
+    pointer.prevSample = pointer.nextSample = null;
+    pivot.vx = pivot.vy = 0;
+    accumulator = 0;
+    stopWarning();
+  }
+
+  canvas.addEventListener('pointerdown', event => {
+    event.preventDefault();
+    registerCornerTap(event);
+    if (!landscape) return;
+    if (pointer.active && pointer.id !== event.pointerId) return;
+    unlockAudio();
+    if (state === 'clear' && stateTime > .55 && pointInButton(event.clientX, event.clientY)) {
+      resetSection();
+    } else if (state === 'title') {
+      resetSection();
+    }
+    pointer.active = true;
+    pointer.id = event.pointerId;
+    recordPointer(event);
+    canvas.setPointerCapture?.(event.pointerId);
+    // 接触開始時は pivot.x/y を変更せず、次の固定刻みから制限付きで追従する。
+  }, { passive: false });
+
+  canvas.addEventListener('pointermove', event => {
+    if (event.pointerId !== pointer.id) return;
+    event.preventDefault();
+    recordPointer(event);
+  }, { passive: false });
+
+  for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+    canvas.addEventListener(name, event => {
+      if (event.pointerId === pointer.id) losePointer();
+    });
+  }
+  window.addEventListener('blur', losePointer);
+  window.addEventListener('pagehide', losePointer);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) losePointer(); });
+  document.addEventListener('contextmenu', event => event.preventDefault());
+  document.addEventListener('dblclick', event => event.preventDefault(), { passive: false });
+
+  // ---- 固定刻み物理とスイープ衝突 ---------------------------------------
+  function physicsStep(dt, now) {
+    updatePivot(dt, now);
+    const oldX = ball.x, oldY = ball.y;
+    ball.px = oldX; ball.py = oldY;
+    const dx = ball.x - pivot.x;
+    const dy = ball.y - pivot.y;
+    const dist = Math.max(.001, Math.hypot(dx, dy));
+    let ax = 0, ay = params.gravity;
+    // ゴムは自然長を超えたときだけ引く。圧縮時の押す力はない。
+    if (dist > effectiveNaturalLength()) {
+      const tension = params.spring * (dist - effectiveNaturalLength());
+      ax -= tension * dx / dist;
+      ay -= tension * dy / dist;
+    }
+    ax -= params.damping * ball.vx;
+    ay -= params.damping * ball.vy;
+    ball.vx += ax * dt;
+    ball.vy += ay * dt;
+    ball.x += ball.vx * dt;
+    ball.y += ball.vy * dt;
+    collideBounds();
+    sweepTargets(oldX, oldY, ball.x, ball.y, dt);
+
+    const stretch = stretchRatioAt();
+    if (stretch >= 1) cutRubber();
+    if (combo > 0) {
+      comboTime -= dt;
+      if (comboTime <= 0 || Math.hypot(ball.vx, ball.vy) < params.speedThreshold * .48) {
+        combo = 0; comboTime = 0;
+      }
+    }
+    warningClock -= dt;
+    if (stretch > .73 && warningClock <= 0) {
+      warningClock = lerp(.48, .19, stretch);
+      warningSound(stretch);
+      if (quality > 0) sparkRubber(stretch);
+    }
+    updateParticles(dt);
+    if (quality > 0) {
+      trail.push({ x: ball.x, y: ball.y, life: 1, stretch });
+      const budget = quality === 2 ? TRAIL_BUDGET : 17;
+      while (trail.length > budget) trail.shift();
+    }
+    for (const p of trail) p.life -= dt * 1.8;
+    while (trail.length && trail[0].life <= 0) trail.shift();
+    sectionTime += dt;
+  }
+
+  function collideBounds() {
+    const inset = safeInsets();
+    if (ball.x - ball.r < inset.left) {
+      ball.x = inset.left + ball.r; if (ball.vx < 0) ball.vx *= -.72;
+    }
+    if (ball.x + ball.r > inset.right) {
+      ball.x = inset.right - ball.r; if (ball.vx > 0) ball.vx *= -.72;
+    }
+    if (ball.y - ball.r < inset.top) {
+      ball.y = inset.top + ball.r; if (ball.vy < 0) ball.vy *= -.72;
+    }
+    if (ball.y + ball.r > inset.bottom) {
+      ball.y = inset.bottom - ball.r; if (ball.vy > 0) ball.vy *= -.72;
+    }
+  }
+
+  function segmentCircle(x1, y1, x2, y2, cx, cy, radius) {
+    const dx = x2 - x1, dy = y2 - y1;
+    const fx = x1 - cx, fy = y1 - cy;
+    const a = dx * dx + dy * dy;
+    if (a < 1e-8) return null;
+    const b = 2 * (fx * dx + fy * dy);
+    const c = fx * fx + fy * fy - radius * radius;
+    const disc = b * b - 4 * a * c;
+    if (disc < 0) return null;
+    const root = Math.sqrt(disc);
+    const t1 = (-b - root) / (2 * a);
+    const t2 = (-b + root) / (2 * a);
+    if (t1 >= 0 && t1 <= 1) return t1;
+    if (t2 >= 0 && t2 <= 1 && c < 0) return 0;
+    return null;
+  }
+
+  function sweepTargets(x1, y1, x2, y2, dt) {
+    let best = null;
+    for (const target of targets) {
+      if (target.dead || target.touching) continue;
+      const hitT = segmentCircle(x1, y1, x2, y2, target.x, target.y, target.r + ball.r);
+      if (hitT !== null && (!best || hitT < best.t)) best = { target, t: hitT };
+    }
+    if (best) resolveTargetHit(best.target, best.t, x1, y1, x2, y2, dt);
+    for (const target of targets) {
+      if (target.dead) continue;
+      const touching = Math.hypot(ball.x - target.x, ball.y - target.y) <= target.r + ball.r + 2;
+      target.touching = touching;
+    }
+  }
+
+  function resolveTargetHit(target, t, x1, y1, x2, y2, dt) {
+    const hx = lerp(x1, x2, t), hy = lerp(y1, y2, t);
+    let nx = hx - target.x, ny = hy - target.y;
+    const nlen = Math.max(.001, Math.hypot(nx, ny));
+    nx /= nlen; ny /= nlen;
+    const closing = Math.max(0, -(ball.vx * nx + ball.vy * ny));
+    const px = pivot.x - pivot.vx * dt * (1 - t);
+    const py = pivot.y - pivot.vy * dt * (1 - t);
+    const stretch = stretchRatioAt(hx, hy, px, py);
+    const normalMinimum = params.speedThreshold * .58;
+    const glassMinimum = params.speedThreshold;
+    const enoughSpeed = closing >= (target.glass ? glassMinimum : normalMinimum);
+    const enoughStretch = !target.glass || stretch >= .72;
+
+    // 限界到達と命中が同じ刻みに来ても、クリアより切断を優先する。
+    if (stretch >= 1) {
+      cutRubber();
+      return;
+    }
+
+    // 得点・破壊は速度閾値を通った直接ヒットだけ。ガラスは深い伸びも同時に必要。
+    if (enoughSpeed && enoughStretch) {
+      target.dead = true;
+      const multiplier = closing >= params.speedThreshold ? 1 + stretch * 3 : 1;
+      score += Math.round((target.glass ? 250 : 100) * multiplier);
+      combo = comboTime > 0 ? combo + 1 : 1;
+      comboTime = COMBO_WINDOW;
+      hitBurst(target.x, target.y, target.color, target.glass ? 22 : 15);
+      hitSound(combo, stretch, target.glass);
+      shake = Math.max(shake, target.glass ? 14 : 7);
+      flash = Math.max(flash, target.glass ? .9 : .45);
+      if (targets.every(item => item.dead)) {
+        if (stretchRatioAt() >= 1) {
+          cutRubber();
+        } else {
+          state = 'clear';
+          stateTime = 0;
+          clearSound();
+        }
+      }
+      return;
+    }
+
+    const dot = ball.vx * nx + ball.vy * ny;
+    if (dot < 0) {
+      ball.vx -= 1.7 * dot * nx;
+      ball.vy -= 1.7 * dot * ny;
+    }
+    ball.x = target.x + nx * (target.r + ball.r + 1);
+    ball.y = target.y + ny * (target.r + ball.r + 1);
+    deniedSound(target.glass, enoughSpeed, enoughStretch);
+    if (target.glass) glassChip(target, enoughSpeed, enoughStretch);
+  }
+
+  function cutRubber() {
+    if (state !== 'playing') return;
+    state = 'cut';
+    stateTime = 0;
+    combo = 0; comboTime = 0;
+    cutAt = { x: lerp(pivot.x, ball.x, .52), y: lerp(pivot.y, ball.y, .52) };
+    shake = 20;
+    cutSound();
+    hitBurst(cutAt.x, cutAt.y, '#ff4d50', 20);
+  }
+
+  // ---- 演出予算 -----------------------------------------------------------
+  function addParticle(p) {
+    if (particles.length >= PARTICLE_BUDGET) particles.shift();
+    particles.push(p);
+  }
+
+  function hitBurst(x, y, color, count) {
+    const n = quality === 2 ? count : quality === 1 ? Math.ceil(count * .55) : 4;
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * TAU, speed = 100 + Math.random() * 260;
+      addParticle({ kind: 'star', x, y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed,
+        life: .45 + Math.random() * .35, max: .8, size: 5 + Math.random() * 8, color, spin: Math.random() * TAU });
+    }
+  }
+
+  function sparkRubber(stretch) {
+    const t = .25 + Math.random() * .6;
+    const x = lerp(pivot.x, ball.x, t), y = lerp(pivot.y, ball.y, t);
+    const a = Math.random() * TAU, speed = 35 + Math.random() * 75;
+    addParticle({ kind: 'spark', x, y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed,
+      life: .18 + Math.random() * .18, max: .36, size: 2 + 3 * stretch, color: '#fff26b', spin: 0 });
+  }
+
+  function glassChip(target, enoughSpeed, enoughStretch) {
+    const color = enoughSpeed && !enoughStretch ? '#ffb23f' : '#bdefff';
+    const n = quality === 2 ? 6 : 3;
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * TAU;
+      addParticle({ kind: 'chip', x: target.x, y: target.y, vx: Math.cos(a) * 85,
+        vy: Math.sin(a) * 85, life: .32, max: .32, size: 4, color, spin: a });
+    }
+  }
+
+  function updateParticles(dt) {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.life -= dt;
+      if (p.life <= 0) { particles.splice(i, 1); continue; }
+      p.vy += 330 * dt;
+      p.x += p.vx * dt; p.y += p.vy * dt; p.spin += dt * 7;
+    }
+  }
+
+  // ---- Web Audio 合成 -----------------------------------------------------
+  let audio = null;
+  let activeVoices = 0;
+  let warningGain = null;
+
+  function unlockAudio() {
+    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtor) return;
+    if (!audio) audio = new AudioCtor();
+    if (audio.state === 'suspended') audio.resume();
+  }
+
+  function tone(freq, duration, type = 'sine', volume = .08, delay = 0) {
+    if (!audio || audio.state !== 'running' || activeVoices >= VOICE_BUDGET) return;
+    const at = audio.currentTime + delay;
+    const oscillator = audio.createOscillator();
+    const gain = audio.createGain();
+    oscillator.type = type;
+    oscillator.frequency.setValueAtTime(freq, at);
+    gain.gain.setValueAtTime(.0001, at);
+    gain.gain.exponentialRampToValueAtTime(volume, at + .012);
+    gain.gain.exponentialRampToValueAtTime(.0001, at + duration);
+    oscillator.connect(gain).connect(audio.destination);
+    activeVoices++;
+    oscillator.onended = () => { activeVoices = Math.max(0, activeVoices - 1); };
+    oscillator.start(at); oscillator.stop(at + duration + .02);
+  }
+
+  function hitSound(chain, stretch, glass) {
+    const scale = [0, 2, 4, 7, 9, 12];
+    const semitone = scale[Math.min(scale.length - 1, chain - 1)];
+    const root = 220 * Math.pow(2, semitone / 12);
+    tone(root, .18, 'triangle', .10);
+    tone(root * 1.5, .12, 'square', .035, .025);
+    if (stretch > .72 || glass) tone(root * 2, .28, 'sine', .055, .045);
+  }
+
+  function deniedSound(glass, enoughSpeed, enoughStretch) {
+    tone(glass ? 115 : 150, .10, 'square', .035);
+    if (glass && enoughSpeed && !enoughStretch) tone(175, .12, 'triangle', .035, .07);
+  }
+
+  function warningSound(stretch) { tone(lerp(330, 620, stretch), .08, 'square', .022); }
+  function stopWarning() { warningClock = 0; warningGain = null; }
+  function cutSound() { tone(120, .45, 'sawtooth', .09); tone(72, .52, 'square', .06, .08); }
+  function clearSound() {
+    [262, 330, 392, 523].forEach((f, i) => tone(f, .34, 'triangle', .07, i * .10));
+  }
+
+  // ---- Canvas 描画 --------------------------------------------------------
+  function draw() {
+    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+    ctx.clearRect(0, 0, view.w, view.h);
+    if (!landscape) { drawPortraitHint(); return; }
+    const sx = shake > 0 ? (Math.random() - .5) * shake : 0;
+    const sy = shake > 0 ? (Math.random() - .5) * shake : 0;
+    ctx.save();
+    ctx.translate(sx, sy);
+    drawBackground();
+    if (state === 'title') drawTitle();
+    else drawGame();
+    ctx.restore();
+    if (flash > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${flash * .28})`;
+      ctx.fillRect(0, 0, view.w, view.h);
+    }
+  }
+
+  function drawBackground() {
+    const grad = ctx.createLinearGradient(0, 0, 0, view.h);
+    grad.addColorStop(0, '#55c9ff'); grad.addColorStop(1, '#d8f6ff');
+    ctx.fillStyle = grad; ctx.fillRect(0, 0, view.w, view.h);
+    const drift = state === 'title' ? performance.now() * .004 : sectionTime * 4;
+    drawCloud((view.w * .16 + drift) % (view.w + 180) - 90, view.h * .18, .85);
+    drawCloud((view.w * .62 + drift * .55) % (view.w + 220) - 110, view.h * .11, 1.1);
+    drawHill(view.w * .18, view.h * .92, view.w * .55, view.h * .43, '#61ca4d');
+    drawHill(view.w * .73, view.h * .94, view.w * .78, view.h * .48, '#35ad55');
+    ctx.fillStyle = '#79d94f'; ctx.fillRect(0, view.h * .88, view.w, view.h * .12);
+    ctx.fillStyle = 'rgba(255,255,255,.20)';
+    for (let x = 24; x < view.w; x += 72) {
+      ctx.beginPath(); ctx.arc(x, view.h * .93 + Math.sin(x) * 4, 5, 0, TAU); ctx.fill();
+    }
+  }
+
+  function drawCloud(x, y, scale) {
+    ctx.save(); ctx.translate(x, y); ctx.scale(scale, scale);
+    ctx.fillStyle = 'rgba(255,255,255,.88)'; ctx.strokeStyle = '#d7f2ff'; ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(-42, 8, 25, Math.PI * .8, Math.PI * 1.9);
+    ctx.arc(-12, -7, 32, Math.PI, TAU);
+    ctx.arc(25, 4, 26, Math.PI * 1.05, TAU * .98);
+    ctx.lineTo(-42, 32); ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
+  }
+
+  function drawHill(x, base, w, h, color) {
+    ctx.fillStyle = color; ctx.strokeStyle = '#168c4c'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(x - w * .55, base);
+    ctx.quadraticCurveTo(x, base - h, x + w * .55, base);
+    ctx.lineTo(x + w * .55, view.h); ctx.lineTo(x - w * .55, view.h); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+  }
+
+  function drawTitle() {
+    const size = clamp(view.h * .105, 35, 70);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+    ctx.font = `900 ${size}px system-ui, sans-serif`;
+    ctx.lineWidth = clamp(size * .16, 6, 11); ctx.strokeStyle = '#17385d'; ctx.fillStyle = '#fff25d';
+    ctx.strokeText('ふりこの だいぼうけん', view.w * .5, view.h * .29);
+    ctx.fillText('ふりこの だいぼうけん', view.w * .5, view.h * .29);
+    drawTitlePendulum(view.w * .5, view.h * .53);
+    const pulse = 1 + Math.sin(performance.now() * .006) * .035;
+    ctx.save(); ctx.translate(view.w * .5, view.h * .80); ctx.scale(pulse, pulse);
+    roundedRect(-125, -26, 250, 52, 26); ctx.fillStyle = '#ff704b'; ctx.fill();
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 5; ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.font = `900 ${clamp(view.h * .041, 18, 29)}px system-ui, sans-serif`;
+    ctx.fillText('タップで はじめる', 0, 1); ctx.restore();
+  }
+
+  function drawTitlePendulum(x, y) {
+    const swing = Math.sin(performance.now() * .003) * .65;
+    const len = clamp(view.h * .23, 78, 145);
+    const bx = x + Math.sin(swing) * len, by = y + Math.cos(swing) * len;
+    ctx.strokeStyle = '#58447b'; ctx.lineWidth = 10; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x, y - 20); ctx.lineTo(bx, by - 20); ctx.stroke();
+    drawPivot(x, y - 20, 0); drawBall(bx, by - 20);
+  }
+
+  function drawGame() {
+    const stretch = stretchRatioAt();
+    for (const item of trail) {
+      ctx.globalAlpha = Math.max(0, item.life) * .28;
+      ctx.fillStyle = item.stretch > .72 ? '#ff5c4f' : '#624fcf';
+      ctx.beginPath(); ctx.arc(item.x, item.y, ball.r * item.life * .55, 0, TAU); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    for (const target of targets) if (!target.dead) drawTarget(target);
+    drawRubber(stretch);
+    drawPointerGuide();
+    drawPivot(pivot.x, pivot.y, stretch);
+    drawBall(ball.x, ball.y);
+    drawParticles();
+    drawHud(stretch);
+    if (!pointer.active && state !== 'clear') drawPauseHint();
+    if (state === 'cut') drawCutOverlay();
+    if (state === 'clear') drawClearOverlay();
+  }
+
+  function drawRubber(stretch) {
+    if (state === 'cut' && cutAt) {
+      drawRubberPart(pivot.x, pivot.y, lerp(pivot.x, ball.x, .46), lerp(pivot.y, ball.y, .46), stretch);
+      drawRubberPart(lerp(pivot.x, ball.x, .59), lerp(pivot.y, ball.y, .59), ball.x, ball.y, stretch);
+      return;
+    }
+    let jitter = stretch > .70 ? (stretch - .70) * 17 : 0;
+    if (!pointer.active) jitter = 0;
+    const nx = ball.y - pivot.y, ny = -(ball.x - pivot.x);
+    const nlen = Math.max(1, Math.hypot(nx, ny));
+    const jx = nx / nlen * Math.sin(sectionTime * 70) * jitter;
+    const jy = ny / nlen * Math.sin(sectionTime * 70) * jitter;
+    const color = stretch < .55 ? '#5948bc' : stretch < .78 ? '#ff9d26' : '#f2384d';
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 9 + stretch * 9; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(pivot.x, pivot.y);
+    ctx.quadraticCurveTo((pivot.x + ball.x) * .5 + jx, (pivot.y + ball.y) * .5 + jy, ball.x, ball.y); ctx.stroke();
+    ctx.strokeStyle = color; ctx.lineWidth = 4 + stretch * 7;
+    ctx.beginPath(); ctx.moveTo(pivot.x, pivot.y);
+    ctx.quadraticCurveTo((pivot.x + ball.x) * .5 + jx, (pivot.y + ball.y) * .5 + jy, ball.x, ball.y); ctx.stroke();
+  }
+
+  function drawRubberPart(x1, y1, x2, y2, stretch) {
+    ctx.strokeStyle = '#f2384d'; ctx.lineWidth = 8 + stretch * 6; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  }
+
+  function drawPointerGuide() {
+    if (!pointer.active) return;
+    ctx.save(); ctx.setLineDash([6, 7]); ctx.strokeStyle = 'rgba(23,56,93,.30)'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(pointer.x, pointer.y); ctx.lineTo(pivot.x, pivot.y); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle = 'rgba(255,255,255,.42)';
+    ctx.beginPath(); ctx.arc(pointer.x, pointer.y, 16, 0, TAU); ctx.fill(); ctx.restore();
+  }
+
+  function drawPivot(x, y, stretch) {
+    const pulse = stretch > .72 ? 1 + Math.sin(sectionTime * 18) * .10 * stretch : 1;
+    ctx.save(); ctx.translate(x, y); ctx.scale(pulse, pulse);
+    ctx.fillStyle = stretch > .78 ? '#ff4b4f' : '#f9d94c'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(0, 0, 15, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(-4, -4, 4, 0, TAU); ctx.fill(); ctx.restore();
+  }
+
+  function drawBall(x, y) {
+    ctx.save(); ctx.translate(x, y);
+    ctx.fillStyle = '#654fd5'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.arc(0, 0, ball.r, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.ellipse(-7, -5, 5, 7, 0, 0, TAU); ctx.ellipse(7, -5, 5, 7, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#17385d'; ctx.beginPath(); ctx.arc(-6, -4, 2.6, 0, TAU); ctx.arc(8, -4, 2.6, 0, TAU); ctx.fill();
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 3, 8, .1, Math.PI - .1); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawTarget(target) {
+    const pulse = 1 + Math.sin(sectionTime * 3 + target.pulse) * .035;
+    ctx.save(); ctx.translate(target.x, target.y); ctx.scale(pulse, pulse);
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 6;
+    if (target.glass) {
+      const stretchReady = stretchRatioAt() >= .72;
+      const speedReady = Math.hypot(ball.vx, ball.vy) >= params.speedThreshold;
+      if (stretchReady) {
+        ctx.shadowColor = speedReady ? '#fff25d' : '#ff9f2e';
+        ctx.shadowBlur = speedReady ? 24 : 13;
+      }
+      ctx.fillStyle = 'rgba(185,241,255,.83)';
+      ctx.beginPath();
+      for (let i = 0; i < 10; i++) {
+        const a = -Math.PI / 2 + i * TAU / 10, rr = target.r * (i % 2 ? .86 : 1.06);
+        ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+      }
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(-target.r * .46, -target.r * .46); ctx.lineTo(-target.r * .08, target.r * .18);
+      ctx.lineTo(target.r * .28, -target.r * .1); ctx.stroke();
+    } else {
+      ctx.fillStyle = target.color; ctx.beginPath(); ctx.arc(0, 0, target.r, 0, TAU); ctx.fill(); ctx.stroke();
+    }
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.ellipse(-target.r * .29, -4, 5, 7, 0, 0, TAU);
+    ctx.ellipse(target.r * .29, -4, 5, 7, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#17385d'; ctx.beginPath(); ctx.arc(-target.r * .27, -3, 2.5, 0, TAU);
+    ctx.arc(target.r * .31, -3, 2.5, 0, TAU); ctx.fill();
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 5, 8, .12, Math.PI - .12); ctx.stroke();
+    if (target.glass) {
+      ctx.fillStyle = '#ff9f2e'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(0, -target.r - 14); ctx.lineTo(-8, -target.r - 2); ctx.lineTo(8, -target.r - 2); ctx.closePath(); ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawParticles() {
+    for (const p of particles) {
+      const alpha = clamp(p.life / p.max, 0, 1);
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.spin); ctx.globalAlpha = alpha;
+      ctx.fillStyle = p.color; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 2;
+      if (p.kind === 'star') drawStar(0, 0, p.size, p.size * .45, 5, true);
+      else if (p.kind === 'chip') {
+        ctx.beginPath(); ctx.moveTo(0, -p.size); ctx.lineTo(p.size, p.size); ctx.lineTo(-p.size, p.size * .5); ctx.closePath(); ctx.fill();
+      } else { ctx.fillRect(-p.size * .5, -p.size * 1.5, p.size, p.size * 3); }
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawStar(x, y, outer, inner, points, stroke = false) {
+    ctx.beginPath();
+    for (let i = 0; i < points * 2; i++) {
+      const r = i % 2 ? inner : outer, a = -Math.PI / 2 + i * Math.PI / points;
+      ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r);
+    }
+    ctx.closePath(); ctx.fill(); if (stroke) ctx.stroke();
+  }
+
+  function drawHud(stretch) {
+    const x = clamp(view.w * .055, 36, 64), y = clamp(view.h * .10, 34, 62);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#17385d'; ctx.font = `900 ${clamp(view.h * .045, 18, 30)}px system-ui, sans-serif`;
+    ctx.fillText(String(score).padStart(4, '0'), x, y);
+    const alive = targets.filter(t => !t.dead).length;
+    for (let i = 0; i < 4; i++) {
+      ctx.fillStyle = i < 4 - alive ? '#fff25d' : 'rgba(23,56,93,.20)';
+      ctx.strokeStyle = '#17385d'; ctx.lineWidth = 2;
+      drawStar(x + i * 23 + 8, y + 30, 8, 3.8, 5, true);
+    }
+    drawStretchMeter(view.w - clamp(view.w * .18, 150, 220), y - 15, clamp(view.w * .13, 110, 170), 22, stretch);
+    if (combo > 0) drawComboRing(view.w * .50, view.h * .15);
+  }
+
+  function drawStretchMeter(x, y, w, h, stretch) {
+    roundedRect(x, y, w, h, h / 2); ctx.fillStyle = 'rgba(255,255,255,.72)'; ctx.fill();
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 4; ctx.stroke();
+    const inner = (w - 8) * stretch;
+    if (inner > 1) {
+      const grad = ctx.createLinearGradient(x, 0, x + w, 0);
+      grad.addColorStop(0, '#55ce72'); grad.addColorStop(.65, '#ffb52d'); grad.addColorStop(1, '#f2384d');
+      roundedRect(x + 4, y + 4, inner, h - 8, (h - 8) / 2); ctx.fillStyle = grad; ctx.fill();
+    }
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x + w * .72, y - 3); ctx.lineTo(x + w * .72, y + h + 3); ctx.stroke();
+  }
+
+  function drawComboRing(x, y) {
+    const fraction = clamp(comboTime / COMBO_WINDOW, 0, 1);
+    const radius = 18 + 28 * fraction;
+    ctx.strokeStyle = '#fff25d'; ctx.lineWidth = 8; ctx.beginPath();
+    ctx.arc(x, y, radius, -Math.PI / 2, -Math.PI / 2 + TAU * fraction); ctx.stroke();
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#17385d';
+    ctx.font = `900 ${clamp(view.h * .043, 18, 28)}px system-ui, sans-serif`; ctx.fillText('×' + combo, x, y + 1);
+  }
+
+  function drawPauseHint() {
+    const x = view.w * .50, y = view.h * .47;
+    ctx.fillStyle = 'rgba(23,56,93,.78)'; roundedRect(x - 116, y - 45, 232, 90, 28); ctx.fill();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
+    ctx.font = `900 ${clamp(view.h * .043, 19, 29)}px system-ui, sans-serif`; ctx.fillText('ゆびを おいてね', x, y + 18);
+    ctx.strokeStyle = '#fff25d'; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(x, y - 15, 11, 0, TAU); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, y - 4); ctx.lineTo(x, y + 5); ctx.stroke();
+  }
+
+  function drawCutOverlay() {
+    const alpha = clamp(stateTime * 2.5, 0, 1);
+    ctx.fillStyle = `rgba(242,56,77,${.12 * alpha})`; ctx.fillRect(0, 0, view.w, view.h);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff'; ctx.strokeStyle = '#17385d';
+    ctx.lineWidth = 7; ctx.font = `900 ${clamp(view.h * .085, 34, 56)}px system-ui, sans-serif`;
+    ctx.strokeText('もう いちど！', view.w * .5, view.h * .38); ctx.fillText('もう いちど！', view.w * .5, view.h * .38);
+  }
+
+  function drawClearOverlay() {
+    ctx.fillStyle = 'rgba(255,255,255,.25)'; ctx.fillRect(0, 0, view.w, view.h);
+    const y = view.h * .35;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff25d'; ctx.strokeStyle = '#17385d';
+    ctx.lineWidth = 9; ctx.font = `900 ${clamp(view.h * .12, 45, 78)}px system-ui, sans-serif`;
+    ctx.strokeText('クリア！', view.w * .5, y); ctx.fillText('クリア！', view.w * .5, y);
+    const orbit = stateTime * 2.4;
+    for (let i = 0; i < 7; i++) {
+      const a = orbit + i * TAU / 7, r = clamp(view.h * .20, 80, 140);
+      ctx.save(); ctx.translate(view.w * .5 + Math.cos(a) * r, y + Math.sin(a) * r * .55);
+      ctx.rotate(a); ctx.fillStyle = i % 2 ? '#ff7552' : '#fff25d'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 3;
+      drawStar(0, 0, 10, 4.5, 5, true); ctx.restore();
+    }
+    clearButton = { x: view.w * .5 - 112, y: view.h * .70, w: 224, h: 58 };
+    const ready = stateTime > .55;
+    roundedRect(clearButton.x, clearButton.y, clearButton.w, clearButton.h, 29);
+    ctx.fillStyle = ready ? '#ff704b' : '#9ab3bd'; ctx.fill(); ctx.strokeStyle = '#17385d'; ctx.lineWidth = 5; ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.font = `900 ${clamp(view.h * .042, 18, 28)}px system-ui, sans-serif`;
+    ctx.fillText('もう いっかい', view.w * .5, clearButton.y + clearButton.h * .53);
+  }
+
+  function pointInButton(x, y) {
+    return x >= clearButton.x && x <= clearButton.x + clearButton.w && y >= clearButton.y && y <= clearButton.y + clearButton.h;
+  }
+
+  function drawPortraitHint() {
+    const grad = ctx.createLinearGradient(0, 0, 0, view.h);
+    grad.addColorStop(0, '#55c9ff'); grad.addColorStop(1, '#c8f2ff');
+    ctx.fillStyle = grad; ctx.fillRect(0, 0, view.w, view.h);
+    ctx.save(); ctx.translate(view.w * .5, view.h * .48);
+    ctx.strokeStyle = '#17385d'; ctx.fillStyle = '#fff'; ctx.lineWidth = 8;
+    roundedRect(-48, -92, 96, 184, 18); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#75d9ff'; roundedRect(-34, -67, 68, 126, 8); ctx.fill();
+    ctx.fillStyle = '#17385d'; ctx.beginPath(); ctx.arc(0, 74, 6, 0, TAU); ctx.fill();
+    ctx.restore();
+    ctx.save(); ctx.translate(view.w * .5, view.h * .48); ctx.rotate(-Math.PI / 2);
+    ctx.strokeStyle = '#ff704b'; ctx.lineWidth = 12; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.arc(0, 0, 132, -.25, Math.PI * 1.12); ctx.stroke();
+    const ax = Math.cos(Math.PI * 1.12) * 132, ay = Math.sin(Math.PI * 1.12) * 132;
+    ctx.fillStyle = '#ff704b'; ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(ax - 24, ay - 12); ctx.lineTo(ax - 7, ay + 22); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  // ---- 開発パネル ---------------------------------------------------------
+  function buildDebugPanel() {
+    for (const [key, label, min, max, step, digits] of parameterSpec) {
+      const row = document.createElement('label');
+      const name = document.createElement('span'); name.textContent = label;
+      const output = document.createElement('output'); output.value = params[key].toFixed(digits);
+      const input = document.createElement('input');
+      input.type = 'range'; input.min = min; input.max = max; input.step = step; input.value = params[key];
+      input.addEventListener('input', () => {
+        params[key] = Number(input.value);
+        if (key === 'naturalLength' && params.breakLength <= params.naturalLength + 24) {
+          params.breakLength = params.naturalLength + 24;
+          syncDebugControl('breakLength');
+        }
+        if (key === 'breakLength' && params.breakLength <= params.naturalLength + 24) {
+          params.naturalLength = params.breakLength - 24;
+          syncDebugControl('naturalLength');
+        }
+        output.value = params[key].toFixed(digits);
+      });
+      row.append(name, output, input); debugPanel.append(row);
+      debugControls[key] = { input, output, digits };
+    }
+    debugPanel.addEventListener('pointerdown', event => event.stopPropagation());
+  }
+
+  function syncDebugControl(key) {
+    const control = debugControls[key];
+    if (!control) return;
+    control.input.value = params[key];
+    control.output.value = params[key].toFixed(control.digits);
+  }
+
+  let cornerTaps = [];
+  function registerCornerTap(event) {
+    if (event.clientX > 96 || event.clientY > 96) { cornerTaps.length = 0; return; }
+    const now = performance.now();
+    cornerTaps.push(now);
+    cornerTaps = cornerTaps.filter(t => now - t < 650);
+    if (cornerTaps.length >= 3) { toggleDebug(); cornerTaps.length = 0; }
+  }
+  function toggleDebug() { debugPanel.hidden = !debugPanel.hidden; }
+  window.addEventListener('keydown', event => {
+    if (event.repeat) return;
+    if (event.key === 'd' || event.key === 'D') toggleDebug();
+  });
+
+  // ---- メインループ -------------------------------------------------------
+  function frame(now) {
+    const rawDelta = Math.min(.1, (now - lastFrame) / 1000);
+    lastFrame = now;
+    if (rawDelta > .028) { slowFrames++; healthyFrames = 0; }
+    else { healthyFrames++; slowFrames = Math.max(0, slowFrames - 1); }
+    if (slowFrames > 8) { quality = Math.max(0, quality - 1); slowFrames = 0; }
+    if (healthyFrames > 600) { quality = Math.min(2, quality + 1); healthyFrames = 0; }
+
+    const simulationActive = landscape && pointer.active && (state === 'playing' || state === 'cut' || state === 'clear');
+    if (simulationActive) {
+      accumulator = Math.min(accumulator + rawDelta, FIXED_DT * MAX_SUBSTEPS);
+      let steps = 0;
+      while (accumulator >= FIXED_DT && steps < MAX_SUBSTEPS) {
+        if (state === 'playing') physicsStep(FIXED_DT, now - accumulator * 1000);
+        else {
+          stateTime += FIXED_DT;
+          updateParticles(FIXED_DT);
+          if (state === 'cut' && stateTime >= 1.15) resetSection();
+        }
+        accumulator -= FIXED_DT;
+        steps++;
+      }
+    } else {
+      accumulator = 0;
+    }
+    shake = Math.max(0, shake - rawDelta * 35);
+    flash = Math.max(0, flash - rawDelta * 2.8);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  buildDebugPanel();
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', () => setTimeout(resize, 80));
+  resize();
+  requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
