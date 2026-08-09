@@ -47,13 +47,16 @@
   const TRAIL_BUDGET = 34;
   const VOICE_BUDGET = 8;
   const COMBO_WINDOW = 2.05;
+  const GLASS_DAMAGE_STRETCH = .40;
+  const GLASS_SHATTER_STRETCH = .72;
+  const DANGER_STRETCH = GLASS_SHATTER_STRETCH;
+  const GLASS_REACTION_TIME = 1;
   const params = {
     gravity: 1040,
     spring: 42,
     damping: 0.48,
     naturalLength: 148,
     breakLength: 286,
-    speedThreshold: 390,
     pivotMaxSpeed: 760,
     pivotMaxAccel: 3600,
     inputSmoothing: 14
@@ -64,7 +67,6 @@
     ['damping', 'げんすい', 0.05, 1.5, 0.01, 2],
     ['naturalLength', 'しぜんちょう', 90, 230, 1, 0],
     ['breakLength', 'せつだんちょう', 190, 390, 1, 0],
-    ['speedThreshold', 'そくどしきい', 180, 720, 5, 0],
     ['pivotMaxSpeed', 'してんそくど', 280, 1300, 10, 0]
   ];
   const debugControls = {};
@@ -85,6 +87,7 @@
   let shake = 0;
   let flash = 0;
   let warningClock = 0;
+  let deepMeterFlash = 0;
   let cutAt = null;
   let clearButton = { x: 0, y: 0, w: 0, h: 0 };
 
@@ -159,7 +162,7 @@
   }
 
   function buildTargets(preserveDead = false) {
-    const oldDead = preserveDead ? targets.map(t => t.dead) : [];
+    const oldState = preserveDead ? targets.map(t => ({ dead: t.dead, damage: t.damage })) : [];
     const h = view.h, w = view.w;
     const radius = clamp(h * .052, 20, 34);
     targets = [
@@ -168,11 +171,17 @@
       makeTarget(w * .67, h * .54, radius, '#ff7a59', 2),
       makeTarget(w * .82, h * .76, radius * 1.08, '#75d9ff', 3, true)
     ];
-    targets.forEach((t, i) => t.dead = oldDead[i] || false);
+    targets.forEach((t, i) => {
+      t.dead = oldState[i]?.dead || false;
+      t.damage = oldState[i]?.damage || 0;
+    });
   }
 
   function makeTarget(x, y, r, color, id, glass = false) {
-    return { x, y, r, color, id, glass, dead: false, touching: false, pulse: Math.random() * TAU };
+    return {
+      x, y, r, color, id, glass, dead: false, touching: false, damage: 0,
+      reactionTime: 0, barrierOpen: 0, pulse: Math.random() * TAU
+    };
   }
 
   function resetSection() {
@@ -181,6 +190,7 @@
     score = 0;
     combo = 0;
     comboTime = 0;
+    deepMeterFlash = 0;
     cutAt = null;
     particles.length = 0;
     trail.length = 0;
@@ -331,12 +341,18 @@
     if (stretch >= 1) cutRubber();
     if (combo > 0) {
       comboTime -= dt;
-      if (comboTime <= 0 || Math.hypot(ball.vx, ball.vy) < params.speedThreshold * .48) {
+      if (comboTime <= 0) {
         combo = 0; comboTime = 0;
       }
     }
+    deepMeterFlash = Math.max(0, deepMeterFlash - dt);
+    for (const target of targets) {
+      target.reactionTime = Math.max(0, target.reactionTime - dt);
+      const open = target.glass && !target.dead && stretch >= GLASS_SHATTER_STRETCH ? 1 : 0;
+      target.barrierOpen += (open - target.barrierOpen) * (1 - Math.exp(-11 * dt));
+    }
     warningClock -= dt;
-    if (stretch > .73 && warningClock <= 0) {
+    if (stretch >= DANGER_STRETCH && warningClock <= 0) {
       warningClock = lerp(.48, .19, stretch);
       warningSound(stretch);
       if (quality > 0) sparkRubber(stretch);
@@ -405,14 +421,11 @@
     let nx = hx - target.x, ny = hy - target.y;
     const nlen = Math.max(.001, Math.hypot(nx, ny));
     nx /= nlen; ny /= nlen;
-    const closing = Math.max(0, -(ball.vx * nx + ball.vy * ny));
     const px = pivot.x - pivot.vx * dt * (1 - t);
     const py = pivot.y - pivot.vy * dt * (1 - t);
     const stretch = stretchRatioAt(hx, hy, px, py);
-    const normalMinimum = params.speedThreshold * .58;
-    const glassMinimum = params.speedThreshold;
-    const enoughSpeed = closing >= (target.glass ? glassMinimum : normalMinimum);
-    const enoughStretch = !target.glass || stretch >= .72;
+    // 押し当てたままの多重判定を防ぐ。離れるまで全経路で再判定しない。
+    target.touching = true;
 
     // 限界到達と命中が同じ刻みに来ても、クリアより切断を優先する。
     if (stretch >= 1) {
@@ -420,29 +433,39 @@
       return;
     }
 
-    // 得点・破壊は速度閾値を通った直接ヒットだけ。ガラスは深い伸びも同時に必要。
-    if (enoughSpeed && enoughStretch) {
-      target.dead = true;
-      const multiplier = closing >= params.speedThreshold ? 1 + stretch * 3 : 1;
-      score += Math.round((target.glass ? 250 : 100) * multiplier);
-      combo = comboTime > 0 ? combo + 1 : 1;
-      comboTime = COMBO_WINDOW;
-      hitBurst(target.x, target.y, target.color, target.glass ? 22 : 15);
-      hitSound(combo, stretch, target.glass);
-      shake = Math.max(shake, target.glass ? 14 : 7);
-      flash = Math.max(flash, target.glass ? .9 : .45);
-      if (targets.every(item => item.dead)) {
-        if (stretchRatioAt() >= 1) {
-          cutRubber();
-        } else {
-          state = 'clear';
-          stateTime = 0;
-          clearSound();
-        }
+    // 通常の的は速度に関係なく、触れた時点の伸びだけを得点へ反映して破壊する。
+    if (!target.glass) {
+      destroyTarget(target, 100 * (1 + 3 * stretch), stretch, false, false);
+      return;
+    }
+
+    if (stretch < GLASS_DAMAGE_STRETCH) {
+      target.reactionTime = GLASS_REACTION_TIME;
+      deepMeterFlash = GLASS_REACTION_TIME;
+      bounceFromTarget(target, nx, ny);
+      boingSound();
+      shake = Math.max(shake, 2.5);
+      return;
+    }
+
+    if (stretch < GLASS_SHATTER_STRETCH) {
+      target.damage++;
+      glassChip(target, 7, 1);
+      glassDamageSound(target.damage);
+      if (target.damage >= 3) {
+        destroyTarget(target, 250, stretch, true, false);
+      } else {
+        bounceFromTarget(target, nx, ny);
+        shake = Math.max(shake, 4 + target.damage * 1.5);
       }
       return;
     }
 
+    // 深い伸びは、それまでのダメージ数に関係なく一撃で粉砕する。
+    destroyTarget(target, 250 * (1 + 3 * stretch), stretch, true, true);
+  }
+
+  function bounceFromTarget(target, nx, ny) {
     const dot = ball.vx * nx + ball.vy * ny;
     if (dot < 0) {
       ball.vx -= 1.7 * dot * nx;
@@ -450,8 +473,28 @@
     }
     ball.x = target.x + nx * (target.r + ball.r + 1);
     ball.y = target.y + ny * (target.r + ball.r + 1);
-    deniedSound(target.glass, enoughSpeed, enoughStretch);
-    if (target.glass) glassChip(target, enoughSpeed, enoughStretch);
+  }
+
+  function destroyTarget(target, points, stretch, glass, intense) {
+    target.dead = true;
+    score += Math.round(points);
+    combo = comboTime > 0 ? combo + 1 : 1;
+    comboTime = COMBO_WINDOW;
+    if (glass) glassShatter(target, intense);
+    else hitBurst(target.x, target.y, target.color, 15);
+    hitSound(combo, stretch, glass);
+    if (glass) shatterSound(intense);
+    shake = Math.max(shake, glass ? (intense ? 19 : 11) : 7);
+    flash = Math.max(flash, glass ? (intense ? 1.25 : .72) : .45);
+    if (targets.every(item => item.dead)) {
+      if (stretchRatioAt() >= 1) {
+        cutRubber();
+      } else {
+        state = 'clear';
+        stateTime = 0;
+        clearSound();
+      }
+    }
   }
 
   function cutRubber() {
@@ -488,14 +531,21 @@
       life: .18 + Math.random() * .18, max: .36, size: 2 + 3 * stretch, color: '#fff26b', spin: 0 });
   }
 
-  function glassChip(target, enoughSpeed, enoughStretch) {
-    const color = enoughSpeed && !enoughStretch ? '#ffb23f' : '#bdefff';
-    const n = quality === 2 ? 6 : 3;
+  function glassChip(target, count = 7, force = 1) {
+    const n = quality === 2 ? count : quality === 1 ? Math.ceil(count * .55) : 3;
     for (let i = 0; i < n; i++) {
       const a = Math.random() * TAU;
-      addParticle({ kind: 'chip', x: target.x, y: target.y, vx: Math.cos(a) * 85,
-        vy: Math.sin(a) * 85, life: .32, max: .32, size: 4, color, spin: a });
+      const speed = (80 + Math.random() * 95) * force;
+      addParticle({ kind: 'chip', x: target.x, y: target.y, vx: Math.cos(a) * speed,
+        vy: Math.sin(a) * speed, life: .32 + .14 * force, max: .46,
+        size: 3 + Math.random() * 4 * force, color: '#bdefff', spin: a });
     }
+  }
+
+  function glassShatter(target, intense) {
+    glassChip(target, intense ? 30 : 14, intense ? 1.8 : 1.2);
+    hitBurst(target.x, target.y, intense ? '#fff25d' : '#bdefff', intense ? 30 : 14);
+    if (intense) hitBurst(target.x, target.y, '#75d9ff', 20);
   }
 
   function updateParticles(dt) {
@@ -542,12 +592,23 @@
     const root = 220 * Math.pow(2, semitone / 12);
     tone(root, .18, 'triangle', .10);
     tone(root * 1.5, .12, 'square', .035, .025);
-    if (stretch > .72 || glass) tone(root * 2, .28, 'sine', .055, .045);
+    if (stretch >= DANGER_STRETCH || glass) tone(root * 2, .28, 'sine', .055, .045);
   }
 
-  function deniedSound(glass, enoughSpeed, enoughStretch) {
-    tone(glass ? 115 : 150, .10, 'square', .035);
-    if (glass && enoughSpeed && !enoughStretch) tone(175, .12, 'triangle', .035, .07);
+  function boingSound() {
+    tone(190, .24, 'sine', .075);
+    tone(108, .32, 'triangle', .055, .06);
+  }
+
+  function glassDamageSound(damage) {
+    const pitch = [0, 310, 430, 570][clamp(damage, 1, 3)];
+    tone(pitch, .16, 'triangle', .085);
+    tone(pitch * 1.45, .11, 'sine', .04, .035);
+  }
+
+  function shatterSound(intense) {
+    tone(intense ? 760 : 570, intense ? .34 : .22, 'sawtooth', intense ? .055 : .035);
+    if (intense) tone(1040, .40, 'triangle', .045, .045);
   }
 
   function warningSound(stretch) { tone(lerp(330, 620, stretch), .08, 'square', .022); }
@@ -639,7 +700,7 @@
     const stretch = stretchRatioAt();
     for (const item of trail) {
       ctx.globalAlpha = Math.max(0, item.life) * .28;
-      ctx.fillStyle = item.stretch > .72 ? '#ff5c4f' : '#624fcf';
+      ctx.fillStyle = item.stretch >= DANGER_STRETCH ? '#ff5c4f' : '#624fcf';
       ctx.beginPath(); ctx.arc(item.x, item.y, ball.r * item.life * .55, 0, TAU); ctx.fill();
     }
     ctx.globalAlpha = 1;
@@ -661,13 +722,13 @@
       drawRubberPart(lerp(pivot.x, ball.x, .59), lerp(pivot.y, ball.y, .59), ball.x, ball.y, stretch);
       return;
     }
-    let jitter = stretch > .70 ? (stretch - .70) * 17 : 0;
+    let jitter = stretch >= DANGER_STRETCH ? (stretch - DANGER_STRETCH) * 20 : 0;
     if (!pointer.active) jitter = 0;
     const nx = ball.y - pivot.y, ny = -(ball.x - pivot.x);
     const nlen = Math.max(1, Math.hypot(nx, ny));
     const jx = nx / nlen * Math.sin(sectionTime * 70) * jitter;
     const jy = ny / nlen * Math.sin(sectionTime * 70) * jitter;
-    const color = stretch < .55 ? '#5948bc' : stretch < .78 ? '#ff9d26' : '#f2384d';
+    const color = stretch < .55 ? '#5948bc' : stretch < DANGER_STRETCH ? '#ff9d26' : '#f2384d';
     ctx.strokeStyle = '#17385d'; ctx.lineWidth = 9 + stretch * 9; ctx.lineCap = 'round';
     ctx.beginPath(); ctx.moveTo(pivot.x, pivot.y);
     ctx.quadraticCurveTo((pivot.x + ball.x) * .5 + jx, (pivot.y + ball.y) * .5 + jy, ball.x, ball.y); ctx.stroke();
@@ -690,9 +751,9 @@
   }
 
   function drawPivot(x, y, stretch) {
-    const pulse = stretch > .72 ? 1 + Math.sin(sectionTime * 18) * .10 * stretch : 1;
+    const pulse = stretch >= DANGER_STRETCH ? 1 + Math.sin(sectionTime * 18) * .10 * stretch : 1;
     ctx.save(); ctx.translate(x, y); ctx.scale(pulse, pulse);
-    ctx.fillStyle = stretch > .78 ? '#ff4b4f' : '#f9d94c'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 5;
+    ctx.fillStyle = stretch >= DANGER_STRETCH ? '#ff4b4f' : '#f9d94c'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 5;
     ctx.beginPath(); ctx.arc(0, 0, 15, 0, TAU); ctx.fill(); ctx.stroke();
     ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(-4, -4, 4, 0, TAU); ctx.fill(); ctx.restore();
   }
@@ -709,15 +770,21 @@
 
   function drawTarget(target) {
     const pulse = 1 + Math.sin(sectionTime * 3 + target.pulse) * .035;
-    ctx.save(); ctx.translate(target.x, target.y); ctx.scale(pulse, pulse);
+    const reacting = target.glass && target.reactionTime > 0;
+    const reactionAge = GLASS_REACTION_TIME - target.reactionTime;
+    const wobble = reacting ? Math.sin(reactionAge * TAU * 5) * target.reactionTime : 0;
+    ctx.save();
+    ctx.translate(target.x + wobble * 4, target.y);
+    ctx.rotate(wobble * .12);
+    ctx.scale(pulse * (reacting ? 1 + Math.abs(wobble) * .10 : 1), pulse * (reacting ? 1 - Math.abs(wobble) * .06 : 1));
     ctx.strokeStyle = '#17385d'; ctx.lineWidth = 6;
     if (target.glass) {
-      const stretchReady = stretchRatioAt() >= .72;
-      const speedReady = Math.hypot(ball.vx, ball.vy) >= params.speedThreshold;
+      const stretchReady = stretchRatioAt() >= GLASS_SHATTER_STRETCH;
       if (stretchReady) {
-        ctx.shadowColor = speedReady ? '#fff25d' : '#ff9f2e';
-        ctx.shadowBlur = speedReady ? 24 : 13;
+        ctx.shadowColor = '#fff25d';
+        ctx.shadowBlur = 24;
       }
+      drawGlassBarrier(target, stretchReady);
       ctx.fillStyle = 'rgba(185,241,255,.83)';
       ctx.beginPath();
       for (let i = 0; i < 10; i++) {
@@ -728,17 +795,116 @@
       ctx.strokeStyle = '#fff'; ctx.lineWidth = 4;
       ctx.beginPath(); ctx.moveTo(-target.r * .46, -target.r * .46); ctx.lineTo(-target.r * .08, target.r * .18);
       ctx.lineTo(target.r * .28, -target.r * .1); ctx.stroke();
+      drawGlassCracks(target);
+      drawTargetFace(target, stretchReady, reacting);
     } else {
       ctx.fillStyle = target.color; ctx.beginPath(); ctx.arc(0, 0, target.r, 0, TAU); ctx.fill(); ctx.stroke();
+      drawTargetFace(target, false, false);
     }
-    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.ellipse(-target.r * .29, -4, 5, 7, 0, 0, TAU);
-    ctx.ellipse(target.r * .29, -4, 5, 7, 0, 0, TAU); ctx.fill();
-    ctx.fillStyle = '#17385d'; ctx.beginPath(); ctx.arc(-target.r * .27, -3, 2.5, 0, TAU);
-    ctx.arc(target.r * .31, -3, 2.5, 0, TAU); ctx.fill();
-    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 5, 8, .12, Math.PI - .12); ctx.stroke();
-    if (target.glass) {
-      ctx.fillStyle = '#ff9f2e'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.moveTo(0, -target.r - 14); ctx.lineTo(-8, -target.r - 2); ctx.lineTo(8, -target.r - 2); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawGlassBarrier(target, stretchReady) {
+    const open = target.barrierOpen;
+    ctx.save();
+    ctx.strokeStyle = stretchReady ? '#fff25d' : 'rgba(255,255,255,.92)';
+    ctx.lineWidth = 7;
+    ctx.lineCap = 'round';
+    for (const side of [-1, 1]) {
+      ctx.save();
+      ctx.translate(side * target.r * .42 * open, 0);
+      ctx.rotate(side * open * .28);
+      ctx.beginPath();
+      if (side < 0) ctx.arc(0, 0, target.r * 1.22, Math.PI * .57, Math.PI * 1.43);
+      else ctx.arc(0, 0, target.r * 1.22, -Math.PI * .43, Math.PI * .43);
+      ctx.stroke();
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  function drawGlassCracks(target) {
+    if (target.damage < 1) return;
+    ctx.save();
+    ctx.strokeStyle = '#327b9a';
+    ctx.lineWidth = 3.2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-target.r * .08, -target.r * .95);
+    ctx.lineTo(-target.r * .13, -target.r * .45);
+    ctx.lineTo(target.r * .08, -target.r * .15);
+    ctx.lineTo(-target.r * .18, target.r * .18);
+    ctx.moveTo(target.r * .08, -target.r * .15);
+    ctx.lineTo(target.r * .42, -target.r * .30);
+    ctx.stroke();
+    if (target.damage >= 2) {
+      ctx.beginPath();
+      ctx.moveTo(-target.r * .18, target.r * .18);
+      ctx.lineTo(target.r * .02, target.r * .48);
+      ctx.lineTo(-target.r * .14, target.r * .88);
+      ctx.moveTo(target.r * .02, target.r * .48);
+      ctx.lineTo(target.r * .43, target.r * .62);
+      ctx.moveTo(-target.r * .13, -target.r * .45);
+      ctx.lineTo(-target.r * .52, -target.r * .62);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawTargetFace(target, stretchReady, laughing) {
+    const r = target.r;
+    ctx.save();
+    ctx.strokeStyle = '#17385d';
+    ctx.fillStyle = '#17385d';
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+
+    if (laughing && !stretchReady) {
+      ctx.beginPath();
+      ctx.arc(-r * .29, -4, 5, .15, Math.PI - .15);
+      ctx.arc(r * .29, -4, 5, .15, Math.PI - .15);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(0, 3, 10, .08, Math.PI - .08);
+      ctx.lineTo(-9, 5); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#ff8291';
+      ctx.beginPath(); ctx.ellipse(0, 10, 5, 2.5, 0, 0, TAU); ctx.fill();
+      ctx.restore();
+      return;
+    }
+
+    if (target.glass && (stretchReady || target.damage >= 2)) {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.ellipse(-r * .29, -4, 6.5, 9, 0, 0, TAU);
+      ctx.ellipse(r * .29, -4, 6.5, 9, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#17385d';
+      ctx.beginPath(); ctx.arc(-r * .25, -2, 2.7, 0, TAU); ctx.arc(r * .25, -2, 2.7, 0, TAU); ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-9, 12); ctx.quadraticCurveTo(-5, 4, 0, 11); ctx.quadraticCurveTo(5, 4, 9, 12); ctx.stroke();
+    } else if (target.glass && target.damage === 1) {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.ellipse(-r * .29, -4, 6, 8, 0, 0, TAU);
+      ctx.ellipse(r * .29, -4, 6, 8, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#17385d';
+      ctx.beginPath(); ctx.arc(-r * .29, -3, 2.4, 0, TAU); ctx.arc(r * .29, -3, 2.4, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(0, 10, 5, 0, TAU); ctx.stroke();
+    } else if (target.glass) {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.ellipse(-r * .29, -3, 5.5, 6, 0, 0, TAU);
+      ctx.ellipse(r * .29, -3, 5.5, 6, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#17385d';
+      ctx.beginPath(); ctx.arc(-r * .25, -2, 2.4, 0, TAU); ctx.arc(r * .33, -2, 2.4, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(-r * .43, -11); ctx.lineTo(-r * .14, -9);
+      ctx.moveTo(r * .14, -9); ctx.lineTo(r * .43, -12); ctx.stroke();
+      ctx.beginPath(); ctx.arc(1, 5, 8, .2, Math.PI * .78); ctx.stroke();
+    } else {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.ellipse(-r * .29, -4, 5, 7, 0, 0, TAU);
+      ctx.ellipse(r * .29, -4, 5, 7, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#17385d';
+      ctx.beginPath(); ctx.arc(-r * .27, -3, 2.5, 0, TAU); ctx.arc(r * .31, -3, 2.5, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(0, 5, 8, .12, Math.PI - .12); ctx.stroke();
     }
     ctx.restore();
   }
@@ -790,8 +956,21 @@
       grad.addColorStop(0, '#55ce72'); grad.addColorStop(.65, '#ffb52d'); grad.addColorStop(1, '#f2384d');
       roundedRect(x + 4, y + 4, inner, h - 8, (h - 8) / 2); ctx.fillStyle = grad; ctx.fill();
     }
+    if (deepMeterFlash > 0 && Math.floor(deepMeterFlash * 12) % 2 === 0) {
+      const deepX = x + w * GLASS_SHATTER_STRETCH;
+      ctx.fillStyle = 'rgba(255,242,93,.88)';
+      ctx.fillRect(deepX, y + 3, w * (1 - GLASS_SHATTER_STRETCH) - 4, h - 6);
+      ctx.strokeStyle = '#f2384d';
+      ctx.lineWidth = 3;
+      for (let cx = deepX + 8; cx < x + w - 5; cx += 13) {
+        ctx.beginPath();
+        ctx.moveTo(cx - 4, y + 6); ctx.lineTo(cx + 2, y + h * .5); ctx.lineTo(cx - 4, y + h - 6);
+        ctx.stroke();
+      }
+    }
     ctx.strokeStyle = '#17385d'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(x + w * .72, y - 3); ctx.lineTo(x + w * .72, y + h + 3); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x + w * GLASS_SHATTER_STRETCH, y - 3);
+    ctx.lineTo(x + w * GLASS_SHATTER_STRETCH, y + h + 3); ctx.stroke();
   }
 
   function drawComboRing(x, y) {
