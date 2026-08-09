@@ -52,24 +52,20 @@
   const DANGER_STRETCH = GLASS_SHATTER_STRETCH;
   const GLASS_REACTION_TIME = 1;
   // 限界は瞬間でなく、一定時間超え続けたときだけ切断する (2026-08-09 実機テストで決定)
-  const CUT_GRACE_TIME = .12;
+  const CUT_GRACE_TIME = .20;
   const params = {
-    gravity: 1040,
-    spring: 36,
-    damping: 0.58,
-    naturalLength: 148,
-    breakLength: 370,
-    pivotMaxSpeed: 760,
-    pivotMaxAccel: 3600,
-    inputSmoothing: 14
+    gravity: 850,
+    spring: 34,
+    damping: 3.0,
+    naturalLength: 120,
+    breakLength: 460
   };
   const parameterSpec = [
     ['gravity', 'じゅうりょく', 300, 1800, 10, 0],
     ['spring', 'ばね', 10, 90, 1, 0],
-    ['damping', 'げんすい', 0.05, 1.5, 0.01, 2],
+    ['damping', 'げんすい', 0.1, 6, 0.05, 2],
     ['naturalLength', 'しぜんちょう', 90, 230, 1, 0],
-    ['breakLength', 'せつだんちょう', 190, 460, 1, 0],
-    ['pivotMaxSpeed', 'してんそくど', 280, 1300, 10, 0]
+    ['breakLength', 'せつだんちょう', 190, 460, 1, 0]
   ];
   const debugControls = {};
 
@@ -91,11 +87,12 @@
   let warningClock = 0;
   let deepMeterFlash = 0;
   let overLimitTime = 0;
+  let idleTime = 0;
   let cutAt = null;
   let clearButton = { x: 0, y: 0, w: 0, h: 0 };
 
   const pointer = {
-    active: false, id: null, x: 0, y: 0,
+    active: false, id: null, x: 0, y: 0, isMouse: false,
     prevSample: null, nextSample: null
   };
   const pivot = { x: 0, y: 0, vx: 0, vy: 0, tx: 0, ty: 0 };
@@ -220,8 +217,9 @@
   }
 
   function offsetPoint(sample) {
-    const vertical = clamp(view.h * .15, 56, 72);
-    const towardCenter = clamp((view.w * .5 - sample.x) * .045, -18, 18);
+    // マウスはカーソルが正確なのでオフセットなし。指は玉が隠れないよう上へずらす。
+    const vertical = pointer.isMouse ? 0 : clamp(view.h * .15, 56, 72);
+    const towardCenter = pointer.isMouse ? 0 : clamp((view.w * .5 - sample.x) * .045, -18, 18);
     return {
       x: clamp(sample.x + towardCenter, 24, view.w - 24),
       y: clamp(sample.y - vertical, 22, view.h - 40),
@@ -230,6 +228,7 @@
   }
 
   function recordPointer(event) {
+    pointer.isMouse = event.pointerType === 'mouse';
     const sample = offsetPoint(pointerPosition(event));
     pointer.x = event.clientX;
     pointer.y = event.clientY;
@@ -237,40 +236,17 @@
     pointer.nextSample = sample;
   }
 
-  function sampledTarget(now) {
-    const a = pointer.prevSample;
-    const b = pointer.nextSample;
-    if (!a || !b || b.time <= a.time) return b || { x: pivot.tx, y: pivot.ty };
-    const renderBehind = now - 12;
-    const t = clamp((renderBehind - a.time) / (b.time - a.time), 0, 1);
-    return { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) };
-  }
-
   function updatePivot(dt, now) {
-    const target = sampledTarget(now);
-    const smoothing = 1 - Math.exp(-params.inputSmoothing * dt);
-    pivot.tx += (target.x - pivot.tx) * smoothing;
-    pivot.ty += (target.y - pivot.ty) * smoothing;
-    const response = .085;
-    let dvx = (pivot.tx - pivot.x) / response;
-    let dvy = (pivot.ty - pivot.y) / response;
-    const desiredSpeed = Math.hypot(dvx, dvy);
-    if (desiredSpeed > params.pivotMaxSpeed) {
-      const s = params.pivotMaxSpeed / desiredSpeed;
-      dvx *= s; dvy *= s;
-    }
-    let ax = dvx - pivot.vx;
-    let ay = dvy - pivot.vy;
-    const change = Math.hypot(ax, ay);
-    const maxChange = params.pivotMaxAccel * dt;
-    if (change > maxChange) {
-      const s = maxChange / change;
-      ax *= s; ay *= s;
-    }
-    pivot.vx += ax;
-    pivot.vy += ay;
-    pivot.x = clamp(pivot.x + pivot.vx * dt, 20, view.w - 20);
-    pivot.y = clamp(pivot.y + pivot.vy * dt, 18, view.h - 42);
+    // 支点はカーソル (指はオクルージョン用に上へオフセット) に完全一致させる。
+    // 遅れを入れると「マウス→支点→玉」の二重操作になり難しくなるので補間しない。
+    const target = pointer.nextSample || { x: pivot.x, y: pivot.y };
+    const prevX = pivot.x, prevY = pivot.y;
+    pivot.x = clamp(target.x, 20, view.w - 20);
+    pivot.y = clamp(target.y, 18, view.h - 42);
+    pivot.tx = pivot.x; pivot.ty = pivot.y;
+    const inv = 1 / Math.max(dt, 1e-4);
+    pivot.vx = (pivot.x - prevX) * inv;
+    pivot.vy = (pivot.y - prevY) * inv;
   }
 
   function losePointer() {
@@ -286,7 +262,8 @@
     event.preventDefault();
     registerCornerTap(event);
     if (!landscape) return;
-    if (pointer.active && pointer.id !== event.pointerId) return;
+    const isMouse = event.pointerType === 'mouse';
+    if (pointer.active && !isMouse && pointer.id !== event.pointerId) return;
     unlockAudio();
     if (state === 'clear' && stateTime > .55 && pointInButton(event.clientX, event.clientY)) {
       resetSection();
@@ -296,21 +273,37 @@
     pointer.active = true;
     pointer.id = event.pointerId;
     recordPointer(event);
-    canvas.setPointerCapture?.(event.pointerId);
+    // タッチだけキャプチャする。マウスはボタンを押さなくても追従させるので不要。
+    if (!isMouse) canvas.setPointerCapture?.(event.pointerId);
     // 接触開始時は pivot.x/y を変更せず、次の固定刻みから制限付きで追従する。
   }, { passive: false });
 
   canvas.addEventListener('pointermove', event => {
+    if (event.pointerType === 'mouse') {
+      // 本物と同じ: マウスは押さなくてもカーソルの位置に支点が付いてくる。
+      if (!landscape || state === 'title') { recordPointer(event); return; }
+      event.preventDefault();
+      pointer.active = true;
+      pointer.id = event.pointerId;
+      recordPointer(event);
+      return;
+    }
     if (event.pointerId !== pointer.id) return;
     event.preventDefault();
     recordPointer(event);
   }, { passive: false });
 
+  // 指を離す/取消はタッチのみ停止。マウスはボタンを離しても止めない。
   for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
     canvas.addEventListener(name, event => {
+      if (event.pointerType === 'mouse') return;
       if (event.pointerId === pointer.id) losePointer();
     });
   }
+  // マウスがゲーム画面の外へ出たら一時停止。
+  canvas.addEventListener('pointerleave', event => {
+    if (event.pointerType === 'mouse') losePointer();
+  });
   window.addEventListener('blur', losePointer);
   window.addEventListener('pagehide', losePointer);
   document.addEventListener('visibilitychange', () => { if (document.hidden) losePointer(); });
@@ -716,7 +709,7 @@
     drawBall(ball.x, ball.y);
     drawParticles();
     drawHud(stretch);
-    if (!pointer.active && state !== 'clear') drawPauseHint();
+    if (idleTime > .28 && state !== 'clear') drawPauseHint();
     if (state === 'cut') drawCutOverlay();
     if (state === 'clear') drawClearOverlay();
   }
@@ -748,7 +741,8 @@
   }
 
   function drawPointerGuide() {
-    if (!pointer.active) return;
+    // マウスは支点=カーソルなので案内線は不要。指のときだけ指→支点を薄く結ぶ。
+    if (!pointer.active || pointer.isMouse) return;
     ctx.save(); ctx.setLineDash([6, 7]); ctx.strokeStyle = 'rgba(23,56,93,.30)'; ctx.lineWidth = 4;
     ctx.beginPath(); ctx.moveTo(pointer.x, pointer.y); ctx.lineTo(pivot.x, pivot.y); ctx.stroke();
     ctx.setLineDash([]); ctx.fillStyle = 'rgba(255,255,255,.42)';
@@ -992,7 +986,8 @@
     const x = view.w * .50, y = view.h * .47;
     ctx.fillStyle = 'rgba(23,56,93,.78)'; roundedRect(x - 116, y - 45, 232, 90, 28); ctx.fill();
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
-    ctx.font = `900 ${clamp(view.h * .043, 19, 29)}px system-ui, sans-serif`; ctx.fillText('ゆびを おいてね', x, y + 18);
+    ctx.font = `900 ${clamp(view.h * .043, 19, 29)}px system-ui, sans-serif`;
+    ctx.fillText(pointer.isMouse ? 'マウスを うごかして' : 'ゆびを おいてね', x, y + 18);
     ctx.strokeStyle = '#fff25d'; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(x, y - 15, 11, 0, TAU); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(x, y - 4); ctx.lineTo(x, y + 5); ctx.stroke();
   }
@@ -1099,6 +1094,8 @@
   function frame(now) {
     const rawDelta = Math.min(.1, (now - lastFrame) / 1000);
     lastFrame = now;
+    // 入力が途切れた時間。ごく短い隙間で一時停止表示が点滅しないよう猶予に使う。
+    if (pointer.active) idleTime = 0; else idleTime += rawDelta;
     if (rawDelta > .028) { slowFrames++; healthyFrames = 0; }
     else { healthyFrames++; slowFrames = Math.max(0, slowFrames - 1); }
     if (slowFrames > 8) { quality = Math.max(0, quality - 1); slowFrames = 0; }
