@@ -54,6 +54,24 @@
   // 限界は瞬間でなく、一定時間超え続けたときだけ切断する (2026-08-09 実機テストで決定)
   const CUT_GRACE_TIME = .20;
   const WALL = 15;   // 跳ね返る壁 (バンパー) の太さ
+  const SECTION_FANFARE_TIME = .38;
+  const SECTION_SPAWN_TIME = .78;
+  const SECTION_SPAWN_START_SCALE = .16;
+  const SECTION_SPAWN_OVERSHOOT = 1.12;
+  const SECTION_SPAWN_RISE_PORTION = .68;
+  const HOME_BUTTON_SIZE = 48;
+  const HOME_BUTTON_INSET = 10;
+  const TARGET_RAIL_WIDTH = 5;
+  const TARGET_RAIL_DASH = 8;
+  const TARGET_RAIL_GAP = 9;
+  const TARGET_SHELL_SCALE = 1.18;
+  const TARGET_SHELL_SHAKE = 5;
+  const TARGET_SHELL_WARNING_RATE = 10;
+  const HIDDEN_TARGET_BOUNCE_SHAKE = 3.5;
+  const SECTION_FANFARE_NOTES = Object.freeze([392, 523, 659]);
+  const SECTION_FANFARE_NOTE_TIME = .22;
+  const SECTION_FANFARE_NOTE_VOLUME = .055;
+  const SECTION_FANFARE_NOTE_DELAY = .07;
   // ---- 調整値: 経済・難易度・装備・星 ----------------------------------
   const SAVE_KEY = 'furiko_save_v1'; // gitleaks:allow (セーブ保存キー名、秘密情報ではない)
   const SAVE_VERSION = 1;
@@ -88,23 +106,104 @@
   });
   const STAGES = Object.freeze([
     Object.freeze({
-      id: 1, locked: false, starScores: Object.freeze([400, 850, 1150]),
-      targets: Object.freeze([
-        Object.freeze({ x: .34, y: .60, radiusScale: 1, color: '#ffd43b' }),
-        Object.freeze({ x: .52, y: .70, radiusScale: 1, color: '#52d273' }),
-        Object.freeze({ x: .67, y: .54, radiusScale: 1, color: '#ff7a59' }),
-        Object.freeze({ x: .82, y: .76, radiusScale: 1.08, color: '#75d9ff', glass: true })
-      ]),
-      // 内側は安全で少なめ、外周は危険で多め。
-      fragments: Object.freeze([
-        Object.freeze({ x: .48, y: .47, value: 1 }),
-        Object.freeze({ x: .72, y: .31, value: 2 }),
-        Object.freeze({ x: .88, y: .44, value: 2 }),
-        Object.freeze({ x: .14, y: .72, value: 2 })
+      id: 1, starScores: Object.freeze([850, 1500]),
+      sections: Object.freeze([
+        Object.freeze({
+          targets: Object.freeze([
+            Object.freeze({ x: .34, y: .60, radiusScale: 1, color: '#ffd43b' }),
+            Object.freeze({ x: .52, y: .70, radiusScale: 1, color: '#52d273' }),
+            Object.freeze({ x: .67, y: .54, radiusScale: 1, color: '#ff7a59' }),
+            Object.freeze({ x: .82, y: .76, radiusScale: 1.08, color: '#75d9ff', glass: true })
+          ]),
+          // 内側は安全で少なめ、外周は危険で多め。
+          fragments: Object.freeze([
+            Object.freeze({ x: .48, y: .47, value: 1 }),
+            Object.freeze({ x: .72, y: .31, value: 2 }),
+            Object.freeze({ x: .88, y: .44, value: 2 }),
+            Object.freeze({ x: .14, y: .72, value: 2 })
+          ])
+        })
       ])
     }),
-    Object.freeze({ id: 2, locked: true, starScores: Object.freeze([600, 950, 1300]), targets: Object.freeze([]), fragments: Object.freeze([]) }),
-    Object.freeze({ id: 3, locked: true, starScores: Object.freeze([700, 1050, 1450]), targets: Object.freeze([]), fragments: Object.freeze([]) })
+    Object.freeze({
+      id: 2, starScores: Object.freeze([1500, 2400]),
+      sections: Object.freeze([
+        Object.freeze({
+          targets: Object.freeze([
+            Object.freeze({ x: .34, y: .60, radiusScale: 1, color: '#ffd43b' }),
+            Object.freeze({ x: .54, y: .70, radiusScale: 1, color: '#52d273' }),
+            Object.freeze({
+              x: .70, y: .56, radiusScale: 1, color: '#ff7a59',
+              move: Object.freeze({ axis: 'y', from: .43, to: .69, period: 3.8, phase: 0 })
+            })
+          ]),
+          fragments: Object.freeze([
+            Object.freeze({ x: .16, y: .72, value: 1 }),
+            Object.freeze({ x: .86, y: .38, value: 2 })
+          ])
+        }),
+        Object.freeze({
+          targets: Object.freeze([
+            Object.freeze({
+              x: .37, y: .47, radiusScale: 1, color: '#ffd43b',
+              move: Object.freeze({ axis: 'x', from: .25, to: .48, period: 3.6, phase: 0 })
+            }),
+            Object.freeze({
+              x: .58, y: .54, radiusScale: 1, color: '#52d273',
+              move: Object.freeze({ axis: 'y', from: .39, to: .69, period: 3.2, phase: .6 })
+            }),
+            Object.freeze({
+              x: .71, y: .60, radiusScale: 1, color: '#ff7a59',
+              move: Object.freeze({ axis: 'x', from: .66, to: .76, period: 2.8, phase: 1.1 })
+            }),
+            Object.freeze({ x: .84, y: .75, radiusScale: 1.08, color: '#75d9ff', glass: true })
+          ]),
+          fragments: Object.freeze([
+            Object.freeze({ x: .14, y: .72, value: 2 }),
+            Object.freeze({ x: .88, y: .40, value: 2 }),
+            Object.freeze({ x: .76, y: .28, value: 1 })
+          ])
+        })
+      ])
+    }),
+    Object.freeze({
+      id: 3, starScores: Object.freeze([1100, 1900]),
+      sections: Object.freeze([
+        Object.freeze({
+          targets: Object.freeze([
+            Object.freeze({
+              x: .55, y: .62, radiusScale: 1, color: '#ffd43b',
+              hide: Object.freeze({ period: 3.8, tucked: 1.0, warning: .42, phase: 0 })
+            })
+          ]),
+          fragments: Object.freeze([
+            Object.freeze({ x: .18, y: .71, value: 1 }),
+            Object.freeze({ x: .84, y: .38, value: 2 })
+          ])
+        }),
+        Object.freeze({
+          targets: Object.freeze([
+            Object.freeze({
+              x: .34, y: .52, radiusScale: 1, color: '#ffd43b',
+              hide: Object.freeze({ period: 3.6, tucked: 1.0, warning: .40, phase: .4 })
+            }),
+            Object.freeze({
+              x: .57, y: .68, radiusScale: 1, color: '#52d273',
+              hide: Object.freeze({ period: 3.2, tucked: .85, warning: .36, phase: 1.2 })
+            }),
+            Object.freeze({
+              x: .70, y: .45, radiusScale: 1, color: '#ff7a59',
+              move: Object.freeze({ axis: 'x', from: .63, to: .76, period: 3.4, phase: .7 })
+            }),
+            Object.freeze({ x: .84, y: .75, radiusScale: 1.08, color: '#75d9ff', glass: true })
+          ]),
+          fragments: Object.freeze([
+            Object.freeze({ x: .14, y: .72, value: 2 }),
+            Object.freeze({ x: .88, y: .38, value: 2 })
+          ])
+        })
+      ])
+    })
   ]);
   const params = {
     gravity: 850,
@@ -148,8 +247,12 @@
   let clearButton = { x: 0, y: 0, w: 0, h: 0 };
   let uiHitAreas = [];
   let selectedStage = 0;
+  let selectedSection = 0;
   let revivesLeft = 0;
   let runFragments = 0;
+  let sectionScoreStart = 0;
+  let sectionFragmentStart = 0;
+  let sectionCollectedStart = new Set();
   let stageFragments = [];
   let collectedFragmentIds = new Set();
   let resultData = null;
@@ -268,6 +371,26 @@
     return equippedRubber(preview).warningStart;
   }
 
+  function currentStage() {
+    return STAGES[selectedStage] || STAGES[0];
+  }
+
+  function currentSection() {
+    const stage = currentStage();
+    return stage.sections[selectedSection] || stage.sections[0];
+  }
+
+  function bestStageStars(stageId) {
+    const record = saveData.stages[stageId];
+    if (!record) return 0;
+    return Math.max(...DIFFICULTIES.map(difficulty => record.stars[difficulty.id] || 0));
+  }
+
+  function stageIsLocked(stageIndex) {
+    if (stageIndex <= 0) return false;
+    return bestStageStars(STAGES[stageIndex - 1].id) < 1;
+  }
+
   function syncEquippedBall() {
     ball.r = BASE_BALL_RADIUS * equippedBall().radiusScale;
   }
@@ -342,35 +465,69 @@
     const oldState = preserveDead ? targets.map(t => ({ dead: t.dead, damage: t.damage })) : [];
     const h = view.h, w = view.w;
     const radius = clamp(h * .062, 24, 40);
-    const stage = STAGES[selectedStage] || STAGES[0];
-    targets = stage.targets.map((item, id) => makeTarget(
-      w * item.x, h * item.y, radius * item.radiusScale, item.color, id, !!item.glass
-    ));
+    targets = currentSection().targets.map((item, id) => makeTarget(item, id, radius));
     targets.forEach((t, i) => {
       t.dead = oldState[i]?.dead || false;
       t.damage = oldState[i]?.damage || 0;
     });
+    updateTargetGimmicks();
   }
 
   function buildStageFragments(preserveCollected = false) {
-    const stage = STAGES[selectedStage] || STAGES[0];
-    stageFragments = stage.fragments.map((item, id) => ({
-      id, x: view.w * item.x, y: view.h * item.y, value: item.value,
-      collected: preserveCollected && collectedFragmentIds.has(id), pulse: id * 1.7
+    stageFragments = currentSection().fragments.map((item, id) => ({
+      id: `${selectedSection}:${id}`, x: view.w * item.x, y: view.h * item.y, value: item.value,
+      collected: preserveCollected && collectedFragmentIds.has(`${selectedSection}:${id}`), pulse: id * 1.7
     }));
   }
 
-  function makeTarget(x, y, r, color, id, glass = false) {
+  function makeTarget(item, id, baseRadius) {
     return {
-      x, y, r, color, id, glass, dead: false, touching: false, damage: 0,
+      x: view.w * item.x, y: view.h * item.y, baseX: view.w * item.x, baseY: view.h * item.y,
+      r: baseRadius * item.radiusScale, color: item.color, id, glass: !!item.glass,
+      move: item.move || null, hide: item.hide || null, hidden: false, hideWarning: false,
+      dead: false, touching: false, damage: 0,
       reactionTime: 0, barrierOpen: 0, pulse: Math.random() * TAU
     };
   }
 
-  function resetSection() {
+  function updateTargetGimmicks() {
+    for (const target of targets) {
+      target.x = target.baseX;
+      target.y = target.baseY;
+      if (target.move) {
+        const motion = target.move;
+        const cycle = ((sectionTime + motion.phase) % motion.period + motion.period) % motion.period;
+        const half = cycle / motion.period;
+        const along = half < .5 ? half * 2 : (1 - half) * 2;
+        if (motion.axis === 'x') target.x = view.w * lerp(motion.from, motion.to, along);
+        else target.y = view.h * lerp(motion.from, motion.to, along);
+      }
+      target.hidden = false;
+      target.hideWarning = false;
+      if (target.hide) {
+        const hiding = target.hide;
+        const cycle = ((sectionTime + hiding.phase) % hiding.period + hiding.period) % hiding.period;
+        const hiddenAt = hiding.period - hiding.tucked;
+        target.hidden = cycle >= hiddenAt;
+        target.hideWarning = target.hidden && cycle >= hiding.period - hiding.warning;
+      }
+    }
+  }
+
+  function resetSection(stageStart = false) {
+    if (stageStart) {
+      selectedSection = 0;
+      score = 0;
+      sectionScoreStart = 0;
+      sectionFragmentStart = 0;
+      sectionCollectedStart = new Set();
+    } else {
+      score = sectionScoreStart;
+      runFragments = sectionFragmentStart;
+      collectedFragmentIds = new Set(sectionCollectedStart);
+    }
     sectionTime = 0;
     stateTime = 0;
-    score = 0;
     combo = 0;
     comboTime = 0;
     deepMeterFlash = 0;
@@ -382,20 +539,38 @@
     buildStageFragments(true);
     placeStart(true);
     state = 'playing';
-    playState = 'active';
+    playState = 'sectionIntro';
     accumulator = 0;
+  }
+
+  function beginNextSection() {
+    selectedSection++;
+    sectionScoreStart = score;
+    sectionFragmentStart = runFragments;
+    sectionCollectedStart = new Set(collectedFragmentIds);
+    sectionTime = 0;
+    stateTime = 0;
+    combo = 0;
+    comboTime = 0;
+    overLimitTime = 0;
+    cutAt = null;
+    buildTargets(false);
+    buildStageFragments(true);
+    placeStart(true);
+    playState = 'sectionIntro';
   }
 
   function startStage(stageIndex) {
     const stage = STAGES[stageIndex];
-    if (!stage || stage.locked) return;
+    if (!stage || stageIsLocked(stageIndex)) return;
     selectedStage = stageIndex;
+    selectedSection = 0;
     revivesLeft = BALANCE.revives[saveData.difficulty];
     runFragments = 0;
     collectedFragmentIds = new Set();
     resultData = null;
     syncEquippedBall();
-    resetSection();
+    resetSection(true);
     losePointer();
   }
 
@@ -488,6 +663,16 @@
     if (area.id === 'difficulty') { setDifficulty(area.data); return true; }
     if (area.id === 'stage') { startStage(area.data); return true; }
     if (area.id === 'workshop') { openWorkshop(); return true; }
+    if (area.id === 'leaveStage') {
+      score = 0;
+      runFragments = 0;
+      collectedFragmentIds = new Set();
+      resultData = null;
+      state = 'stageSelect';
+      playState = 'active';
+      losePointer();
+      return true;
+    }
     if (area.id === 'backToStages' || area.id === 'resultNext') {
       state = 'stageSelect'; losePointer(); return true;
     }
@@ -535,6 +720,7 @@
       }
       return;
     }
+    if (handleUiAction(hitAreaAt(event.clientX, event.clientY))) return;
     if (playState === 'clear' && stateTime > BALANCE.clearResultDelay && pointInButton(event.clientX, event.clientY)) {
       finishStage(true);
       return;
@@ -738,6 +924,13 @@
 
     // 限界超過中でも猶予時間内の命中は成立させる (切断は physicsStep の猶予タイマーが判定)。
 
+    if (target.hidden) {
+      bounceFromTarget(target, nx, ny);
+      boingSound();
+      shake = Math.max(shake, HIDDEN_TARGET_BOUNCE_SHAKE);
+      return;
+    }
+
     // 通常の的は速度に関係なく、触れた時点の伸びだけを得点へ反映して破壊する。
     if (!target.glass) {
       destroyTarget(target, 100 * (1 + 3 * stretch), stretch, false, false);
@@ -794,6 +987,10 @@
     if (targets.every(item => item.dead)) {
       if (stretchRatioAt() >= 1) {
         cutRubber();
+      } else if (selectedSection < currentStage().sections.length - 1) {
+        playState = 'sectionTransition';
+        stateTime = 0;
+        sectionFanfare();
       } else {
         playState = 'clear';
         stateTime = 0;
@@ -819,7 +1016,7 @@
     const scoreFragments = Math.floor(score / BALANCE.scorePerFragment);
     const gross = scoreFragments + runFragments;
     const awarded = cleared ? gross : Math.floor(gross * BALANCE.failurePayoutRate);
-    const stars = cleared ? stage.starScores.filter(limit => score >= limit).length : 0;
+    const stars = cleared ? 1 + stage.starScores.filter(limit => score >= limit).length : 0;
     resultData = { cleared, score, stars, scoreFragments, pickedFragments: runFragments, awarded };
     saveData.fragments += awarded;
     if (cleared) {
@@ -959,6 +1156,11 @@
   function cutSound() { tone(120, .45, 'sawtooth', .09); tone(72, .52, 'square', .06, .08); }
   function clearSound() {
     [262, 330, 392, 523].forEach((f, i) => tone(f, .34, 'triangle', .07, i * .10));
+  }
+  function sectionFanfare() {
+    SECTION_FANFARE_NOTES.forEach((f, i) => tone(
+      f, SECTION_FANFARE_NOTE_TIME, 'triangle', SECTION_FANFARE_NOTE_VOLUME, i * SECTION_FANFARE_NOTE_DELAY
+    ));
   }
 
   // ---- Canvas 描画 --------------------------------------------------------
@@ -1116,11 +1318,11 @@
     const panelW = (view.w - margin * 2 - gap * 2) / 3;
     STAGES.forEach((stage, index) => {
       const x = margin + index * (panelW + gap);
-      drawPanel(x, panelY, panelW, panelH, stage.locked ? 'rgba(220,235,240,.91)' : 'rgba(255,255,255,.93)');
-      if (stage.locked) {
+      const locked = stageIsLocked(index);
+      drawPanel(x, panelY, panelW, panelH, locked ? 'rgba(220,235,240,.91)' : 'rgba(255,255,255,.93)');
+      if (locked) {
         drawLock(x + panelW * .5, panelY + panelH * .39, clamp(panelH * .22, 34, 54));
         ctx.fillStyle = '#597184'; ctx.font = `900 ${clamp(view.h * .031, 14, 20)}px system-ui, sans-serif`;
-        ctx.fillText('じゅんびちゅう', x + panelW * .5, panelY + panelH * .68);
         for (let i = 0; i < 3; i++) {
           ctx.fillStyle = 'rgba(23,56,93,.13)'; ctx.strokeStyle = '#597184'; ctx.lineWidth = 2;
           drawStar(x + panelW * .5 + (i - 1) * 30, panelY + panelH * .84, 11, 5, 5, true);
@@ -1357,6 +1559,7 @@
     }
     ctx.globalAlpha = 1;
     for (const item of stageFragments) if (!item.collected) drawStageFragment(item);
+    for (const target of targets) if (!target.dead && target.move) drawTargetRail(target);
     for (const target of targets) if (!target.dead) drawTarget(target);
     drawRubber(stretch);
     drawPointerGuide();
@@ -1367,6 +1570,52 @@
     if (idleTime > .28 && playState !== 'clear') drawPauseHint();
     if (playState === 'cut') drawCutOverlay();
     if (playState === 'clear') drawClearOverlay();
+    drawHomeButton();
+  }
+
+  function drawTargetRail(target) {
+    const motion = target.move;
+    const x1 = motion.axis === 'x' ? view.w * motion.from : target.baseX;
+    const y1 = motion.axis === 'y' ? view.h * motion.from : target.baseY;
+    const x2 = motion.axis === 'x' ? view.w * motion.to : target.baseX;
+    const y2 = motion.axis === 'y' ? view.h * motion.to : target.baseY;
+    ctx.save();
+    ctx.setLineDash([TARGET_RAIL_DASH, TARGET_RAIL_GAP]);
+    ctx.strokeStyle = 'rgba(23,56,93,.25)';
+    ctx.lineWidth = TARGET_RAIL_WIDTH;
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(255,255,255,.62)';
+    ctx.strokeStyle = 'rgba(23,56,93,.30)';
+    ctx.lineWidth = 3;
+    for (const point of [[x1, y1], [x2, y2]]) {
+      ctx.beginPath(); ctx.arc(point[0], point[1], 7, 0, TAU); ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawHomeButton() {
+    const f = fieldRect();
+    const x = f.left + HOME_BUTTON_INSET;
+    const y = f.bottom - HOME_BUTTON_SIZE - HOME_BUTTON_INSET;
+    const size = HOME_BUTTON_SIZE;
+    roundedRect(x, y, size, size, 17);
+    ctx.fillStyle = 'rgba(255,255,255,.92)'; ctx.fill();
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 4; ctx.stroke();
+    ctx.fillStyle = '#ff704b'; ctx.strokeStyle = '#17385d'; ctx.lineWidth = 3; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x + size * .20, y + size * .48);
+    ctx.lineTo(x + size * .50, y + size * .22);
+    ctx.lineTo(x + size * .80, y + size * .48);
+    ctx.lineTo(x + size * .72, y + size * .48);
+    ctx.lineTo(x + size * .72, y + size * .76);
+    ctx.lineTo(x + size * .28, y + size * .76);
+    ctx.lineTo(x + size * .28, y + size * .48);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(x + size * .45, y + size * .59, size * .11, size * .17);
+    addHitArea('leaveStage', x, y, size, size);
   }
 
   function drawStageFragment(item) {
@@ -1439,11 +1688,34 @@
     const reacting = target.glass && target.reactionTime > 0;
     const reactionAge = GLASS_REACTION_TIME - target.reactionTime;
     const wobble = reacting ? Math.sin(reactionAge * TAU * 5) * target.reactionTime : 0;
+    const spawn = playState === 'sectionIntro' ? clamp(stateTime / SECTION_SPAWN_TIME, 0, 1) : 1;
+    const rise = clamp(spawn / SECTION_SPAWN_RISE_PORTION, 0, 1);
+    const settle = clamp((spawn - SECTION_SPAWN_RISE_PORTION) / (1 - SECTION_SPAWN_RISE_PORTION), 0, 1);
+    const spawnScale = spawn < SECTION_SPAWN_RISE_PORTION
+      ? lerp(SECTION_SPAWN_START_SCALE, SECTION_SPAWN_OVERSHOOT, rise)
+      : lerp(SECTION_SPAWN_OVERSHOOT, 1, settle);
+    const warningShake = target.hideWarning
+      ? Math.sin(sectionTime * TAU * TARGET_SHELL_WARNING_RATE) * TARGET_SHELL_SHAKE : 0;
     ctx.save();
-    ctx.translate(target.x + wobble * 4, target.y);
+    ctx.globalAlpha = .18 + spawn * .22;
+    ctx.fillStyle = '#17385d';
+    ctx.beginPath();
+    ctx.ellipse(target.x, target.y + target.r * 1.08, target.r * (1.20 - spawn * .28), target.r * .24, 0, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.translate(target.x + wobble * 4 + warningShake, target.y);
     ctx.rotate(wobble * .12);
-    ctx.scale(pulse * (reacting ? 1 + Math.abs(wobble) * .10 : 1), pulse * (reacting ? 1 - Math.abs(wobble) * .06 : 1));
+    ctx.scale(
+      spawnScale * pulse * (reacting ? 1 + Math.abs(wobble) * .10 : 1),
+      spawnScale * pulse * (reacting ? 1 - Math.abs(wobble) * .06 : 1)
+    );
     ctx.strokeStyle = '#17385d'; ctx.lineWidth = 6;
+    if (target.hide) drawHideShell(target, target.hidden);
+    if (target.hidden) {
+      ctx.restore();
+      return;
+    }
     if (target.glass) {
       const stretchReady = stretchRatioAt() >= GLASS_SHATTER_STRETCH;
       if (stretchReady) {
@@ -1466,6 +1738,31 @@
     } else {
       ctx.fillStyle = target.color; ctx.beginPath(); ctx.arc(0, 0, target.r, 0, TAU); ctx.fill(); ctx.stroke();
       drawTargetFace(target, false, false);
+    }
+    ctx.restore();
+  }
+
+  function drawHideShell(target, closed) {
+    const r = target.r * TARGET_SHELL_SCALE;
+    ctx.save();
+    ctx.fillStyle = '#d58b3d';
+    ctx.strokeStyle = '#17385d';
+    ctx.lineWidth = 6;
+    if (closed) {
+      ctx.beginPath(); ctx.ellipse(0, 0, r, r * .82, 0, 0, TAU); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = '#fff0a5'; ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(0, 0, r * .70, -.72, .72);
+      ctx.arc(0, 0, r * .70, Math.PI - .72, Math.PI + .72);
+      ctx.stroke();
+      ctx.strokeStyle = '#17385d'; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(-r * .72, 0); ctx.quadraticCurveTo(0, r * .18, r * .72, 0); ctx.stroke();
+    } else {
+      for (const side of [-1, 1]) {
+        ctx.save(); ctx.translate(side * r * .74, 0); ctx.rotate(side * .18);
+        ctx.beginPath(); ctx.ellipse(0, 0, r * .42, r * .78, 0, 0, TAU); ctx.fill(); ctx.stroke();
+        ctx.restore();
+      }
     }
     ctx.restore();
   }
@@ -1605,10 +1902,17 @@
     ctx.fillStyle = '#17385d'; ctx.font = `900 ${clamp(view.h * .045, 18, 30)}px system-ui, sans-serif`;
     ctx.fillText(String(score).padStart(4, '0'), x, y);
     const alive = targets.filter(t => !t.dead).length;
-    for (let i = 0; i < 4; i++) {
-      ctx.fillStyle = i < 4 - alive ? '#fff25d' : 'rgba(23,56,93,.20)';
+    for (let i = 0; i < targets.length; i++) {
+      ctx.fillStyle = i < targets.length - alive ? '#fff25d' : 'rgba(23,56,93,.20)';
       ctx.strokeStyle = '#17385d'; ctx.lineWidth = 2;
       drawStar(x + i * 23 + 8, y + 30, 8, 3.8, 5, true);
+    }
+    const sectionCount = currentStage().sections.length;
+    const sectionCenter = view.w * .5;
+    for (let i = 0; i < sectionCount; i++) {
+      ctx.fillStyle = i <= selectedSection ? '#ff704b' : 'rgba(23,56,93,.20)';
+      ctx.strokeStyle = '#17385d'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(sectionCenter + (i - (sectionCount - 1) * .5) * 22, y + 31, 6, 0, TAU); ctx.fill(); ctx.stroke();
     }
     const fragmentX = view.w * .5 - 34;
     drawFragmentIcon(fragmentX, y, 10);
@@ -1791,6 +2095,7 @@
           // Easy は params を変えず、危険帯にいる固定刻みだけ時間を縮める。
           const timeScale = saveData.difficulty === 'easy' && stretchRatioAt() >= BALANCE.easySlowTrigger
             ? BALANCE.easyTimeScale : 1;
+          updateTargetGimmicks();
           physicsStep(FIXED_DT * timeScale, now - accumulator * 1000);
         }
         else {
@@ -1798,7 +2103,18 @@
           updateParticles(FIXED_DT);
           if (playState === 'cut' && stateTime >= BALANCE.cutResultDelay) {
             if (revivesLeft > 0) { revivesLeft--; resetSection(); }
-            else finishStage(false);
+            else {
+              score = sectionScoreStart;
+              runFragments = sectionFragmentStart;
+              finishStage(false);
+            }
+          }
+          else if (playState === 'sectionTransition' && stateTime >= SECTION_FANFARE_TIME) {
+            beginNextSection();
+          }
+          else if (playState === 'sectionIntro' && stateTime >= SECTION_SPAWN_TIME) {
+            playState = 'active';
+            stateTime = 0;
           }
         }
         accumulator -= FIXED_DT;
