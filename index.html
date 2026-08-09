@@ -53,6 +53,7 @@
   const GLASS_REACTION_TIME = 1;
   // 限界は瞬間でなく、一定時間超え続けたときだけ切断する (2026-08-09 実機テストで決定)
   const CUT_GRACE_TIME = .20;
+  const WALL = 15;   // 跳ね返る壁 (バンパー) の太さ
   const params = {
     gravity: 850,
     spring: 34,
@@ -88,6 +89,7 @@
   let deepMeterFlash = 0;
   let overLimitTime = 0;
   let idleTime = 0;
+  const wallFlash = { left: 0, right: 0, top: 0, bottom: 0 };
   let cutAt = null;
   let clearButton = { x: 0, y: 0, w: 0, h: 0 };
 
@@ -139,9 +141,15 @@
     buildTargets(true);
   }
 
-  function safeInsets() {
-    const side = clamp(view.w * .035, 28, 58);
-    return { left: side, right: view.w - side, top: 24, bottom: view.h - 24 };
+  // 跳ね返る場所を見える壁と一致させる。床は草地の上端に置く。
+  function fieldRect() {
+    const m = clamp(view.w * .022, 14, 38);
+    return {
+      left: m + WALL,
+      right: view.w - m - WALL,
+      top: clamp(view.h * .045, 22, 54) + WALL,
+      bottom: view.h * .875
+    };
   }
 
   function placeStart(resetBall = true) {
@@ -348,6 +356,7 @@
       }
     }
     deepMeterFlash = Math.max(0, deepMeterFlash - dt);
+    for (const side in wallFlash) wallFlash[side] = Math.max(0, wallFlash[side] - dt * 3.2);
     for (const target of targets) {
       target.reactionTime = Math.max(0, target.reactionTime - dt);
       const open = target.glass && !target.dead && stretch >= GLASS_SHATTER_STRETCH ? 1 : 0;
@@ -371,19 +380,26 @@
   }
 
   function collideBounds() {
-    const inset = safeInsets();
-    if (ball.x - ball.r < inset.left) {
-      ball.x = inset.left + ball.r; if (ball.vx < 0) ball.vx *= -.72;
+    const f = fieldRect(), r = ball.r;
+    if (ball.x - r < f.left) {
+      ball.x = f.left + r; if (ball.vx < -60) wallHit('left', f.left, ball.y); if (ball.vx < 0) ball.vx *= -.72;
     }
-    if (ball.x + ball.r > inset.right) {
-      ball.x = inset.right - ball.r; if (ball.vx > 0) ball.vx *= -.72;
+    if (ball.x + r > f.right) {
+      ball.x = f.right - r; if (ball.vx > 60) wallHit('right', f.right, ball.y); if (ball.vx > 0) ball.vx *= -.72;
     }
-    if (ball.y - ball.r < inset.top) {
-      ball.y = inset.top + ball.r; if (ball.vy < 0) ball.vy *= -.72;
+    if (ball.y - r < f.top) {
+      ball.y = f.top + r; if (ball.vy < -60) wallHit('top', ball.x, f.top); if (ball.vy < 0) ball.vy *= -.72;
     }
-    if (ball.y + ball.r > inset.bottom) {
-      ball.y = inset.bottom - ball.r; if (ball.vy > 0) ball.vy *= -.72;
+    if (ball.y + r > f.bottom) {
+      ball.y = f.bottom - r; if (ball.vy > 90) wallHit('bottom', ball.x, f.bottom); if (ball.vy > 0) ball.vy *= -.72;
     }
+  }
+
+  function wallHit(side, x, y) {
+    wallFlash[side] = 1;
+    shake = Math.max(shake, 4);
+    hitBurst(x, y, '#ffe08a', 6);
+    wallSound();
   }
 
   function segmentCircle(x1, y1, x2, y2, cx, cy, radius) {
@@ -609,6 +625,7 @@
     if (intense) tone(1040, .40, 'triangle', .045, .045);
   }
 
+  function wallSound() { tone(150, .07, 'sine', .05); tone(96, .10, 'triangle', .035, .015); }
   function warningSound(stretch) { tone(lerp(330, 620, stretch), .08, 'square', .022); }
   function stopWarning() { warningClock = 0; warningGain = null; }
   function cutSound() { tone(120, .45, 'sawtooth', .09); tone(72, .52, 'square', .06, .08); }
@@ -694,8 +711,43 @@
     drawPivot(x, y - 20, 0); drawBall(bx, by - 20);
   }
 
+  function drawField() {
+    const f = fieldRect();
+    const outerL = f.left - WALL, outerR = f.right + WALL, outerT = f.top - WALL;
+    // 天井・左右のバンパー
+    drawBumper(outerL, outerT, outerR - outerL, WALL, wallFlash.top, 'h');
+    drawBumper(outerL, outerT, WALL, f.bottom - outerT, wallFlash.left, 'v');
+    drawBumper(f.right, outerT, WALL, f.bottom - outerT, wallFlash.right, 'v');
+    // 床 = 草地の上端。跳ねる線をはっきり見せる。
+    ctx.fillStyle = '#3f9d3a';
+    roundedRect(outerL, f.bottom - 7, outerR - outerL, 12, 5); ctx.fill();
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 3; ctx.stroke();
+    if (wallFlash.bottom > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${wallFlash.bottom * .7})`;
+      roundedRect(outerL, f.bottom - 8, outerR - outerL, 12, 5); ctx.fill();
+    }
+  }
+
+  function drawBumper(x, y, w, h, flash, orient) {
+    ctx.save();
+    roundedRect(x, y, w, h, Math.min(w, h) * .42);
+    ctx.fillStyle = '#ffb43a'; ctx.fill();
+    ctx.strokeStyle = '#17385d'; ctx.lineWidth = 4; ctx.stroke();
+    ctx.clip();
+    ctx.fillStyle = 'rgba(255,255,255,.34)';
+    if (orient === 'v') ctx.fillRect(x + 3, y, w * .32, h);
+    else ctx.fillRect(x, y + 3, w, h * .32);
+    // バンパーらしい斑点
+    ctx.fillStyle = 'rgba(23,56,93,.18)';
+    if (orient === 'v') for (let yy = y + 14; yy < y + h; yy += 26) { ctx.beginPath(); ctx.arc(x + w * .62, yy, 3, 0, TAU); ctx.fill(); }
+    else for (let xx = x + 14; xx < x + w; xx += 26) { ctx.beginPath(); ctx.arc(xx, y + h * .62, 3, 0, TAU); ctx.fill(); }
+    if (flash > 0) { ctx.fillStyle = `rgba(255,255,255,${flash * .85})`; ctx.fillRect(x, y, w, h); }
+    ctx.restore();
+  }
+
   function drawGame() {
     const stretch = stretchRatioAt();
+    drawField();
     for (const item of trail) {
       ctx.globalAlpha = Math.max(0, item.life) * .28;
       ctx.fillStyle = item.stretch >= DANGER_STRETCH ? '#ff5c4f' : '#624fcf';
